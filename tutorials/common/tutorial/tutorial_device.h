@@ -61,6 +61,8 @@ extern "C" RTCRayQueryFlags g_iflags_coherent;
 extern "C" RTCRayQueryFlags g_iflags_incoherent;
 extern "C" Shader shader;
 
+extern "C" void sort_scene();
+
 /* error reporting function */
 void error_handler(void* userPtr, RTCError code, const char* str = nullptr);
 
