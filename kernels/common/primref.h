@@ -17,29 +17,33 @@
 #pragma once
 
 #include "default.h"
-#include "scene_bezier_curves.h"
+#include "../geometry/leaftype.h"
 
 namespace embree
 {
-namespace isa
-{
   /*! A primitive reference stores the bounds of the primitive and its ID. */
-  struct __aligned(32) PrimRef 
+  struct __aligned(16) PrimRef 
   {
     __forceinline PrimRef () {}
 
 #if defined(__AVX__)
     __forceinline PrimRef(const PrimRef& v) { 
-      vfloat8::store((float*)this,vfloat8::load((float*)&v));
+      vfloat8::storeu((float*)this,vfloat8::loadu((float*)&v));
     }
     __forceinline void operator=(const PrimRef& v) { 
-      vfloat8::store((float*)this,vfloat8::load((float*)&v));
+      vfloat8::storeu((float*)this,vfloat8::loadu((float*)&v));
     }
 #endif
 
     __forceinline PrimRef (const BBox3fa& bounds, unsigned int geomID, unsigned int primID) 
     {
       lower = bounds.lower; lower.a = geomID;
+      upper = bounds.upper; upper.a = primID;
+    }
+
+    __forceinline PrimRef (const BBox3fa& bounds, Leaf::Type ty, unsigned int geomID, unsigned int primID) 
+    {
+      lower = bounds.lower; lower.a = Leaf::encode(ty,geomID);
       upper = bounds.upper; upper.a = primID;
     }
 
@@ -76,37 +80,24 @@ namespace isa
       center_o = embree::center2(bounds_o);
     }
 
-    /*! returns center for binning */
-    __forceinline Vec3fa binCenter(const AffineSpace3fa& space, void* user) const // only called by hair builder
-    {
-      Scene* scene = (Scene*) user;
-      NativeCurves* mesh = (NativeCurves*) scene->get(geomID());
-      BBox3fa bounds = mesh->bounds(space,primID());
-      return embree::center2(bounds);
+    __forceinline unsigned& geomIDref() {  // FIXME: remove !!!!!!!
+      return lower.u;
     }
-
-    /*! returns bounds and centroid used for binning */
-    __forceinline void binBoundsAndCenter(BBox3fa& bounds_o, Vec3fa& center_o, const AffineSpace3fa& space, void* user) const // only called by hair builder
-    {
-      Scene* scene = (Scene*) user;
-      NativeCurves* mesh = (NativeCurves*) scene->get(geomID());
-      BBox3fa bounds = mesh->bounds(space,primID());
-      bounds_o = bounds;
-      center_o = embree::center2(bounds);
+    __forceinline unsigned& primIDref() {  // FIXME: remove !!!!!!!
+      return upper.u;
+    }
+    
+    /*! returns the primitive type */
+    __forceinline Leaf::Type type() const { 
+      return Leaf::decodeTy(lower.a);
     }
 
     /*! returns the geometry ID */
-    __forceinline unsigned& geomID() { 
-      return lower.u;
-    }
     __forceinline unsigned geomID() const { 
-      return lower.a;
+      return Leaf::decodeID(lower.a);
     }
 
     /*! returns the primitive ID */
-    __forceinline unsigned& primID() { 
-      return upper.u;
-    }
     __forceinline unsigned primID() const { 
       return upper.a;
     }
@@ -144,13 +135,12 @@ namespace isa
   __forceinline void xchg(PrimRef& a, PrimRef& b)
   {
 #if defined(__AVX__)
-    const vfloat8 aa = vfloat8::load((float*)&a);
-    const vfloat8 bb = vfloat8::load((float*)&b);
-    vfloat8::store((float*)&a,bb);
-    vfloat8::store((float*)&b,aa);
+    const vfloat8 aa = vfloat8::loadu((float*)&a);
+    const vfloat8 bb = vfloat8::loadu((float*)&b);
+    vfloat8::storeu((float*)&a,bb);
+    vfloat8::storeu((float*)&b,aa);
 #else
     std::swap(a,b);
 #endif
   }
-}
 }

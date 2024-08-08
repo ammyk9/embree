@@ -1,13 +1,25 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "subdivpatch1base.h"
 
 namespace embree
 {
-namespace isa
-{
-  SubdivPatch1Base::SubdivPatch1Base (const unsigned int gID,
+  SubdivPatch1Base::SubdivPatch1Base (const Leaf::Type ltype,
+                                      const unsigned int gID,
                                       const unsigned int pID,
                                       const unsigned int subPatch,
                                       const SubdivMesh *const mesh,
@@ -16,10 +28,10 @@ namespace isa
                                       const float edge_level[4],
                                       const int subdiv[4],
                                       const int simd_width)
-  : flags(0), type(INVALID_PATCH), geom(gID), prim(pID), time_(unsigned(time))
+  : geom(Leaf::encode(ltype,gID)), prim(pID), flags(0), type(INVALID_PATCH), time_(unsigned(time))
   {
     static_assert(sizeof(SubdivPatch1Base) == 5 * 64, "SubdivPatch1Base has wrong size");
-    
+
     const HalfEdge* edge = mesh->getHalfEdge(0,pID);
 
     if (edge->patch_type == HalfEdge::BILINEAR_PATCH)
@@ -29,7 +41,7 @@ namespace isa
     }
     else if (edge->patch_type == HalfEdge::REGULAR_QUAD_PATCH) 
     {
-#if PATCH_USE_BEZIER_PATCH
+#if PATCH_USE_BEZIER_PATCH 
       type = BEZIER_PATCH;
       new (patch_v) BezierPatch3fa(BSplinePatch3fa(CatmullClarkPatch3fa(edge,mesh->getVertexBuffer(time))));
 #else
@@ -112,5 +124,4 @@ namespace isa
 
     return grid_changed;
   }
-}
 }

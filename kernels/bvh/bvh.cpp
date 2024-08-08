@@ -1,5 +1,18 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "bvh.h"
 #include "bvh_statistics.h"
@@ -9,10 +22,14 @@ namespace embree
   template<int N>
   BVHN<N>::BVHN (const PrimitiveType& primTy, Scene* scene)
     : AccelData((N==4) ? AccelData::TY_BVH4 : (N==8) ? AccelData::TY_BVH8 : AccelData::TY_UNKNOWN),
-      primTy(&primTy), device(scene->device), scene(scene),
-      root(emptyNode), alloc(scene->device,scene->isStaticAccel()), numPrimitives(0), numVertices(0)
-  {
-  }
+      primTy(&primTy), primTys(nullptr),  numTypes(1), device(scene->device), scene(scene),
+      root(emptyNode), alloc(scene->device,scene->isStatic()), numPrimitives(0), numVertices(0) {}
+
+  template<int N>
+  BVHN<N>::BVHN (const PrimitiveType** primTys, unsigned numTypes, Scene* scene)
+    : AccelData((N==4) ? AccelData::TY_BVH4 : (N==8) ? AccelData::TY_BVH8 : AccelData::TY_UNKNOWN),
+      primTy(nullptr), primTys(primTys), numTypes(numTypes), device(scene->device), scene(scene),
+      root(emptyNode), alloc(scene->device,scene->isStatic()), numPrimitives(0), numVertices(0) {}
 
   template<int N>
   BVHN<N>::~BVHN ()
@@ -42,7 +59,7 @@ namespace embree
     if (node.isBarrier())
       node.clearBarrier();
     else if (!node.isLeaf()) {
-      BaseNode* n = node.baseNode(); // FIXME: flags should be stored in BVH
+      BaseNode* n = node.baseNode(BVH_FLAG_ALIGNED_NODE); // FIXME: flags should be stored in BVH
       for (size_t c=0; c<N; c++)
         clearBarrier(n->child(c));
     }
@@ -51,7 +68,6 @@ namespace embree
   template<int N>
   void BVHN<N>::layoutLargeNodes(size_t num)
   {
-#if defined(__64BIT__) // do not use tree rotations on 32 bit platforms, barrier bit in NodeRef will cause issues
     struct NodeArea 
     {
       __forceinline NodeArea() {}
@@ -74,8 +90,8 @@ namespace embree
     {
       std::pop_heap(lst.begin(), lst.end());
       NodeArea n = lst.back(); lst.pop_back();
-      if (!n.node->isAABBNode()) break;
-      AABBNode* node = n.node->getAABBNode();
+      if (!n.node->isAlignedNode()) break;
+      AlignedNode* node = n.node->alignedNode();
       for (size_t i=0; i<N; i++) {
         if (node->child(i) == BVHN::emptyNode) continue;
         lst.push_back(NodeArea(node->child(i),node->bounds(i)));
@@ -87,7 +103,6 @@ namespace embree
       lst[i].node->setBarrier();
       
     root = layoutLargeNodesRecursion(root,alloc.getCachedAllocator());
-#endif
   }
   
   template<int N>
@@ -97,10 +112,10 @@ namespace embree
       node.clearBarrier();
       return node;
     }
-    else if (node.isAABBNode()) 
+    else if (node.isAlignedNode()) 
     {
-      AABBNode* oldnode = node.getAABBNode();
-      AABBNode* newnode = (BVHN::AABBNode*) allocator.malloc0(sizeof(BVHN::AABBNode),byteNodeAlignment);
+      AlignedNode* oldnode = node.alignedNode();
+      AlignedNode* newnode = (BVHN::AlignedNode*) allocator.malloc0(sizeof(BVHN::AlignedNode),byteNodeAlignment);
       *newnode = *oldnode;
       for (size_t c=0; c<N; c++)
         newnode->child(c) = layoutLargeNodesRecursion(oldnode->child(c),allocator);
@@ -115,14 +130,14 @@ namespace embree
     if (builderName == "") 
       return inf;
 
-    if (device->verbosity(2))
+    if (device->verbosity(1))
     {
       Lock<MutexSys> lock(g_printMutex);
-      std::cout << "building BVH" << N << (builderName.find("MBlur") != std::string::npos ? "MB" : "") << "<" << primTy->name() << "> using " << builderName << " ..." << std::endl << std::flush;
+      std::cout << "building " << name() << " using " << builderName << " ..." << std::endl << std::flush;
     }
 
     double t0 = 0.0;
-    if (device->benchmark || device->verbosity(2)) t0 = getSeconds();
+    if (device->benchmark || device->verbosity(1)) t0 = getSeconds();
     return t0;
   }
 
@@ -133,18 +148,18 @@ namespace embree
       return;
     
     double dt = 0.0;
-    if (device->benchmark || device->verbosity(2)) 
+    if (device->benchmark || device->verbosity(1)) 
       dt = getSeconds()-t0;
 
     std::unique_ptr<BVHNStatistics<N>> stat;
 
     /* print statistics */
-    if (device->verbosity(2))
+    if (device->verbosity(1))
     {
       if (!stat) stat.reset(new BVHNStatistics<N>(this));
       const size_t usedBytes = alloc.getUsedBytes();
       Lock<MutexSys> lock(g_printMutex);
-      std::cout << "finished BVH" << N << "<" << primTy->name() << "> : " << 1000.0f*dt << "ms, " << 1E-6*double(numPrimitives)/dt << " Mprim/s, " << 1E-9*double(usedBytes)/dt << " GB/s" << std::endl;
+      std::cout << "finished " << name() << ": " << 1000.0f*dt << "ms, " << 1E-6*double(numPrimitives)/dt << " Mprim/s, " << 1E-9*double(usedBytes)/dt << " GB/s" << std::endl;
     
       if (device->verbosity(2))
         std::cout << stat->str();
@@ -175,7 +190,7 @@ namespace embree
     {
       if (!stat) stat.reset(new BVHNStatistics<N>(this));
       Lock<MutexSys> lock(g_printMutex);
-      std::cout << "BENCHMARK_BUILD " << dt << " " << double(numPrimitives)/dt << " " << stat->sah() << " " << stat->bytesUsed() << " BVH" << N << "<" << primTy->name() << ">" << std::endl << std::flush;
+      std::cout << "BENCHMARK_BUILD " << dt << " " << double(numPrimitives)/dt << " " << stat->sah() << " " << stat->bytesUsed() << " " << name() << std::endl << std::flush;
     }
   }
 
@@ -183,7 +198,7 @@ namespace embree
   template class BVHN<8>;
 #endif
 
-#if !defined(__AVX__) || !defined(EMBREE_TARGET_SSE2) && !defined(EMBREE_TARGET_SSE42) || defined(__aarch64__)
+#if !defined(__AVX__) || !defined(EMBREE_TARGET_SSE2) && !defined(EMBREE_TARGET_SSE42)
   template class BVHN<4>;
 #endif
 }

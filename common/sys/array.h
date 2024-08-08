@@ -1,5 +1,18 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
@@ -16,8 +29,8 @@ namespace embree
 
       /********************** Iterators  ****************************/
 
-      __forceinline T* begin() const { return items; };
-      __forceinline T* end  () const { return items+N; };
+      __forceinline T* begin() { return items; };
+      __forceinline T* end  () { return items+N; };
 
 
       /********************** Capacity ****************************/
@@ -59,8 +72,8 @@ namespace embree
 
       /********************** Iterators  ****************************/
 
-      __forceinline T* begin() const { return (T*)items; };
-      __forceinline T* end  () const { return (T*)items+M; };
+      __forceinline T* begin() { return items; };
+      __forceinline T* end  () { return items+M; };
 
 
       /********************** Capacity ****************************/
@@ -101,8 +114,8 @@ namespace embree
       __forceinline       T& at(size_t i)       { assert(i < M); return items[i]; }
       __forceinline const T& at(size_t i) const { assert(i < M); return items[i]; }
 
-      __forceinline T& front() { assert(M > 0); return items[0]; };
-      __forceinline T& back () { assert(M > 0); return items[M-1]; };
+      __forceinline T& front() const { assert(M > 0); return items[0]; };
+      __forceinline T& back () const { assert(M > 0); return items[M-1]; };
 
       __forceinline       T* data()       { return items; };
       __forceinline const T* data() const { return items; };
@@ -139,7 +152,7 @@ namespace embree
     __forceinline       Ty& operator[](const unsigned i)       { assert(i<N); return data[i]; }
     __forceinline const Ty& operator[](const unsigned i) const { assert(i<N); return data[i]; }
 
-#if defined(__64BIT__) || defined(__EMSCRIPTEN__)
+#if defined(__X86_64__)
     __forceinline       Ty& operator[](const size_t i)       { assert(i<N); return data[i]; }
     __forceinline const Ty& operator[](const size_t i) const { assert(i<N); return data[i]; }
 #endif
@@ -148,75 +161,5 @@ namespace embree
     Ty arr[max_stack_bytes/sizeof(Ty)];
     Ty* data;
     size_t N;
-
-  private:
-    StackArray (const StackArray& other) DELETED; // do not implement
-    StackArray& operator= (const StackArray& other) DELETED; // do not implement
-
-  };
-
-  /*! dynamic sized array that is allocated on the stack */
-  template<typename Ty, size_t max_stack_elements, size_t max_total_elements>
-    struct __aligned(64) DynamicStackArray
-  {
-    __forceinline DynamicStackArray ()
-      : data(&arr[0]) {}
-
-    __forceinline ~DynamicStackArray ()
-    {
-      if (!isStackAllocated())
-        delete[] data;
-    }
-
-    __forceinline bool isStackAllocated() const {
-      return data == &arr[0];
-    }
-
-    __forceinline size_t size() const
-    {
-      if (isStackAllocated()) return max_stack_elements;
-      else return max_total_elements;
-    }
-
-    __forceinline void resize(size_t M)
-    {
-      assert(M <= max_total_elements);
-      if (likely(M <= max_stack_elements)) return;
-      if (likely(!isStackAllocated())) return;
-
-      data = new Ty[max_total_elements];
-      
-      for (size_t i=0; i<max_stack_elements; i++)
-        data[i] = arr[i];
-    }
-
-    __forceinline operator       Ty* ()       { return data; }
-    __forceinline operator const Ty* () const { return data; }
-
-    __forceinline       Ty& operator[](const int i)      { assert(i>=0 && i<max_total_elements); resize(i+1); return data[i]; }
-    __forceinline       Ty& operator[](const unsigned i) { assert(i<max_total_elements); resize(i+1); return data[i]; }
-
-#if defined(__64BIT__) || defined(__EMSCRIPTEN__)
-    __forceinline       Ty& operator[](const size_t i) { assert(i<max_total_elements); resize(i+1); return data[i]; }
-#endif
-
-    __forceinline DynamicStackArray (const DynamicStackArray& other)
-      : data(&arr[0]) 
-    {
-      for (size_t i=0; i<other.size(); i++)
-        this->operator[] (i) = other[i];
-    }
-     
-    DynamicStackArray& operator= (const DynamicStackArray& other)
-    {
-      for (size_t i=0; i<other.size(); i++)
-        this->operator[] (i) = other[i];
-
-      return *this;
-    }
-
-  private:
-    Ty arr[max_stack_elements];
-    Ty* data;
   };
 }

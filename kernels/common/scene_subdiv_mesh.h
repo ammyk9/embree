@@ -123,6 +123,10 @@ namespace isa
       return topology[0].valid(i) && !invalidFace(i,j);
     }
 
+    __forceinline Leaf::Type leafType() {
+      return numTimeSteps == 1 ? Leaf::TY_SUBDIV : Leaf::TY_SUBDIV_MB;
+    }
+
     /*! prints some statistics */
     void printStatistics();
 

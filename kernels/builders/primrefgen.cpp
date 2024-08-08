@@ -1,8 +1,20 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "primrefgen.h"
-#include "primrefgen_presplit.h"
 
 #include "../../common/algorithms/parallel_for_for.h"
 #include "../../common/algorithms/parallel_for_for_prefix_sum.h"
@@ -11,144 +23,277 @@ namespace embree
 {
   namespace isa
   {
-    PrimInfo createPrimRefArray(Geometry* geometry, unsigned int geomID, const size_t numPrimRefs, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
+    template<typename Mesh>
+    PrimInfo createPrimRefArray(Mesh* mesh, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
     {
       ParallelPrefixSumState<PrimInfo> pstate;
-      
       /* first try */
       progressMonitor(0);
-      PrimInfo pinfo = parallel_prefix_sum( pstate, size_t(0), geometry->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo {
-          return geometry->createPrimRefArray(prims,r,r.begin(),geomID);
-        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+      PrimInfo pinfo = parallel_prefix_sum( pstate, size_t(0), mesh->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo
+      {
+        size_t k = r.begin();
+        PrimInfo pinfo(empty);
+        Leaf::Type ty = mesh->leafType();
+        for (size_t j=r.begin(); j<r.end(); j++)
+        {
+          BBox3fa bounds = empty;
+          if (!mesh->buildBounds(j,&bounds)) continue;
+          const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));          
+          pinfo.add_center2(prim);
+          prims[k++] = prim;
+        }
+        return pinfo;
+      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
 
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_prefix_sum( pstate, size_t(0), geometry->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo {
-          return geometry->createPrimRefArray(prims,r,base.size(),geomID);
+        pinfo = parallel_prefix_sum( pstate, size_t(0), mesh->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo
+        {
+          size_t k = base.size();
+          PrimInfo pinfo(empty);
+          Leaf::Type ty = mesh->leafType();
+          for (size_t j=r.begin(); j<r.end(); j++)
+          {
+            BBox3fa bounds = empty;
+            if (!mesh->buildBounds(j,&bounds)) continue;
+            const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+            pinfo.add_center2(prim);
+            prims[k++] = prim;
+          }
+          return pinfo;
         }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       }
       return pinfo;
     }
 
-    PrimInfo createPrimRefArray(Scene* scene, Geometry::GTypeMask types, bool mblur, const size_t numPrimRefs, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
+    template<typename Mesh>
+    PrimInfo createGroupPrimRefArray(GeometryGroup* group, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
     {
       ParallelForForPrefixSumState<PrimInfo> pstate;
-      Scene::Iterator2 iter(scene,types,mblur);
+      
+      /* first try */
+      progressMonitor(0);
+      pstate.init(*group,size_t(1024));
+      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, *group, PrimInfo(empty), [&](Geometry* geom, const range<size_t>& r, size_t k) -> PrimInfo
+      {
+        Mesh* mesh = dynamic_cast<Mesh*>(geom);
+        Leaf::Type ty = mesh->leafType();
+        PrimInfo pinfo(empty);
+        for (size_t j=r.begin(); j<r.end(); j++)
+        {
+          BBox3fa bounds = empty;
+          if (!mesh->buildBounds(j,&bounds)) continue;
+          const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+          pinfo.add_center2(prim);
+          prims[k++] = prim;
+        }
+        return pinfo;
+      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+      
+      /* if we need to filter out geometry, run again */
+      if (pinfo.size() != prims.size())
+      {
+        progressMonitor(0);
+        pinfo = parallel_for_for_prefix_sum1( pstate, *group, PrimInfo(empty), [&](Geometry* geom, const range<size_t>& r, size_t k, const PrimInfo& base) -> PrimInfo
+        {
+          Mesh* mesh = dynamic_cast<Mesh*>(geom);
+          Leaf::Type ty = mesh->leafType();
+          k = base.size();
+          PrimInfo pinfo(empty);
+          for (size_t j=r.begin(); j<r.end(); j++)
+          {
+            BBox3fa bounds = empty;
+            if (!mesh->buildBounds(j,&bounds)) continue;
+            const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+            pinfo.add_center2(prim);
+            prims[k++] = prim;
+          }
+          return pinfo;
+        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+      }
+      return pinfo;
+    }
+
+    template<typename Mesh, bool mblur>
+    PrimInfo createPrimRefArray(Scene* scene, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
+    {
+      ParallelForForPrefixSumState<PrimInfo> pstate;
+      Scene::Iterator<Mesh,mblur> iter(scene);
       
       /* first try */
       progressMonitor(0);
       pstate.init(iter,size_t(1024));
-      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfo {
-          return mesh->createPrimRefArray(prims,r,k,(unsigned)geomID);
-        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k) -> PrimInfo
+      {
+        PrimInfo pinfo(empty);
+        Leaf::Type ty = mesh->leafType();
+        for (size_t j=r.begin(); j<r.end(); j++)
+        {
+          BBox3fa bounds = empty;
+          if (!mesh->buildBounds(j,&bounds)) continue;
+          const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+          pinfo.add_center2(prim);
+          prims[k++] = prim;
+        }
+        return pinfo;
+      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfo& base) -> PrimInfo {
-            return mesh->createPrimRefArray(prims,r,base.size(),(unsigned)geomID);
-          }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k, const PrimInfo& base) -> PrimInfo
+        {
+          k = base.size();
+          PrimInfo pinfo(empty);
+          Leaf::Type ty = mesh->leafType();
+          for (size_t j=r.begin(); j<r.end(); j++)
+          {
+            BBox3fa bounds = empty;
+            if (!mesh->buildBounds(j,&bounds)) continue;
+            const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+            pinfo.add_center2(prim);
+            prims[k++] = prim;
+          }
+          return pinfo;
+        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       }
       return pinfo;
     }
 
-    PrimInfo createPrimRefArray(Scene* scene, Geometry::GTypeMask types, bool mblur, const size_t numPrimRefs, mvector<PrimRef>& prims, mvector<SubGridBuildData>& sgrids, BuildProgressMonitor& progressMonitor)
+    PrimInfo createMultiPrimRefArray(Scene* scene, Geometry::Type ty, bool mblur, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
     {
       ParallelForForPrefixSumState<PrimInfo> pstate;
-      Scene::Iterator2 iter(scene,types,mblur);
+      Scene::MultiIterator iter(scene,ty,mblur);
       
       /* first try */
       progressMonitor(0);
       pstate.init(iter,size_t(1024));
-      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfo {
-         return mesh->createPrimRefArray(prims,sgrids,r,k,(unsigned)geomID);
-       }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Geometry* geom, const range<size_t>& r, size_t k) -> PrimInfo {
+          return geom->createPrimRefArray(prims,r,k);
+      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfo& base) -> PrimInfo {
-          return mesh->createPrimRefArray(prims,sgrids,r,base.size(),(unsigned)geomID);
+        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Geometry* geom, const range<size_t>& r, size_t k, const PrimInfo& base) -> PrimInfo {
+            return geom->createPrimRefArray(prims,r,base.size());
         }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       }
       return pinfo;
     }
 
-    PrimInfo createPrimRefArrayMBlur(Scene* scene, Geometry::GTypeMask types, const size_t numPrimRefs, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor, size_t itime)
+    template<typename Mesh>
+    PrimInfo createPrimRefArrayMBlur(size_t timeSegment, Scene* scene, mvector<PrimRef>& prims, BuildProgressMonitor& progressMonitor)
     {
       ParallelForForPrefixSumState<PrimInfo> pstate;
-      Scene::Iterator2 iter(scene,types,true);
-      
+      Scene::Iterator<Mesh,true> iter(scene);
+
       /* first try */
       progressMonitor(0);
       pstate.init(iter,size_t(1024));
-      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfo {
-          return mesh->createPrimRefArrayMB(prims,itime,r,k,(unsigned)geomID);
-        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
-      
+      PrimInfo pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k) -> PrimInfo
+      {
+        PrimInfo pinfo(empty);
+        Leaf::Type ty = mesh->leafType();
+        for (size_t j=r.begin(); j<r.end(); j++)
+        {
+          BBox3fa bounds = empty;
+          if (!mesh->buildBounds(j,timeSegment,bounds)) continue;
+          const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+          pinfo.add_center2(prim);
+          prims[k++] = prim;
+        }
+        return pinfo;
+      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfo& base) -> PrimInfo {
-            return mesh->createPrimRefArrayMB(prims,itime,r,base.size(),(unsigned)geomID);
-          }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
+        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k, const PrimInfo& base) -> PrimInfo
+        {
+          k = base.size();
+          PrimInfo pinfo(empty);
+          Leaf::Type ty = mesh->leafType();
+          for (size_t j=r.begin(); j<r.end(); j++)
+          {
+            BBox3fa bounds = empty;
+            if (!mesh->buildBounds(j,timeSegment,bounds)) continue;
+            const PrimRef prim(bounds,ty,mesh->geomID,unsigned(j));
+            pinfo.add_center2(prim);
+            prims[k++] = prim;
+          }
+          return pinfo;
+        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
       }
       return pinfo;
     }
 
-    PrimInfoMB createPrimRefArrayMSMBlur(Scene* scene, Geometry::GTypeMask types, const size_t numPrimRefs, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1)
+    template<typename Mesh>
+    __noinline PrimInfoMB calculatePrimRefMB(mvector<PrimRefMB>& prims, const BBox1f& t0t1, Mesh* mesh, const range<size_t>& r, size_t k)
+    {
+      PrimInfoMB pinfo(empty);
+      Leaf::Type ty = mesh->leafType();
+      for (size_t j=r.begin(); j<r.end(); j++)
+      {
+        LBBox3fa bounds = empty;
+        if (!mesh->linearBounds(j,t0t1,bounds)) continue;
+        const PrimRefMB prim(bounds,mesh->numTimeSegments(),mesh->numTimeSegments(),ty,mesh->geomID,unsigned(j));
+        pinfo.add_primref(prim);
+        prims[k++] = prim;
+      }
+      return pinfo;
+    }
+    
+    template<typename Mesh>
+    PrimInfoMB createPrimRefArrayMSMBlur(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1)
     {
       ParallelForForPrefixSumState<PrimInfoMB> pstate;
-      Scene::Iterator2 iter(scene,types,true);
+      Scene::Iterator<Mesh,true> iter(scene);
       
       /* first try */
       progressMonitor(0);
       pstate.init(iter,size_t(1024));
-      PrimInfoMB pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfoMB(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfoMB {
-          return mesh->createPrimRefMBArray(prims,t0t1,r,k,(unsigned)geomID);
+      PrimInfoMB pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfoMB(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k) -> PrimInfoMB {
+          return calculatePrimRefMB(prims,t0t1,mesh,r,k);
       }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
       
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfoMB(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfoMB& base) -> PrimInfoMB {
-            return mesh->createPrimRefMBArray(prims,t0t1,r,base.size(),(unsigned)geomID);
+        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfoMB(empty), [&](Mesh* mesh, const range<size_t>& r, size_t k, const PrimInfoMB& base) -> PrimInfoMB {
+            return calculatePrimRefMB(prims,t0t1,mesh,r,base.size());
         }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
       }
-
-      /* the BVH starts with that time range, even though primitives might have smaller/larger time range */
       pinfo.time_range = t0t1;
       return pinfo;
     }
 
-    PrimInfoMB createPrimRefArrayMSMBlur(Scene* scene, Geometry::GTypeMask types, const size_t numPrimRefs, mvector<PrimRefMB>& prims, mvector<SubGridBuildData>& sgrids, BuildProgressMonitor& progressMonitor, BBox1f t0t1)
+    PrimInfoMB createMultiPrimRefArrayMSMBlur(Scene* scene, Geometry::Type ty, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1)
     {
       ParallelForForPrefixSumState<PrimInfoMB> pstate;
-      Scene::Iterator2 iter(scene,types,true);
+      Scene::MultiIterator iter(scene,ty,true);
       
       /* first try */
       progressMonitor(0);
       pstate.init(iter,size_t(1024));
-      PrimInfoMB pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfoMB(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfoMB {
-         return mesh->createPrimRefMBArray(prims,sgrids,t0t1,r,k,(unsigned)geomID);
+      PrimInfoMB pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfoMB(empty), [&](Geometry* geom, const range<size_t>& r, size_t k) -> PrimInfoMB {
+          return geom->createPrimRefArrayMB(prims,t0t1,r,k);
       }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
       
       /* if we need to filter out geometry, run again */
-      if (pinfo.size() != numPrimRefs)
+      if (pinfo.size() != prims.size())
       {
         progressMonitor(0);
-        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfoMB(empty), [&](Geometry* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfoMB& base) -> PrimInfoMB {
-          return mesh->createPrimRefMBArray(prims,sgrids,t0t1,r,base.size(),(unsigned)geomID);
+        pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfoMB(empty), [&](Geometry* geom, const range<size_t>& r, size_t k, const PrimInfoMB& base) -> PrimInfoMB {
+            return geom->createPrimRefArrayMB(prims,t0t1,r,base.size());
         }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
       }
-
-      /* the BVH starts with that time range, even though primitives might have smaller/larger time range */
       pinfo.time_range = t0t1;
       return pinfo;
     }
@@ -227,133 +372,41 @@ namespace embree
       return numPrimitivesGen;
     }
 
-    // ====================================================================================================
-    // ====================================================================================================
-    // ====================================================================================================
-
-    // special variants for grid meshes
-
-#if defined(EMBREE_GEOMETRY_GRID)
-    PrimInfo createPrimRefArrayGrids(Scene* scene, mvector<PrimRef>& prims, mvector<SubGridBuildData>& sgrids)
-    {
-      PrimInfo pinfo(empty);
-      size_t numPrimitives = 0;
-      
-      /* first run to get #primitives */
-
-      ParallelForForPrefixSumState<PrimInfo> pstate;
-      Scene::Iterator<GridMesh,false> iter(scene);
-
-      pstate.init(iter,size_t(1024));
-
-      /* iterate over all meshes in the scene */
-      pinfo = parallel_for_for_prefix_sum0( pstate, iter, PrimInfo(empty), [&](GridMesh* mesh, const range<size_t>& r, size_t k, size_t geomID) -> PrimInfo {
-          PrimInfo pinfo(empty);
-          for (size_t j=r.begin(); j<r.end(); j++)
-          {
-            if (!mesh->valid(j)) continue;
-            BBox3fa bounds = empty;
-            const PrimRef prim(bounds,(unsigned)geomID,(unsigned)j);
-            if (!mesh->valid(j)) continue;
-            pinfo.add_center2(prim,mesh->getNumSubGrids(j));
-          }
-          return pinfo;
-        }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
-      numPrimitives = pinfo.size();
-          
-      /* resize arrays */
-      sgrids.resize(numPrimitives); 
-      prims.resize(numPrimitives); 
-
-      /* second run to fill primrefs and SubGridBuildData arrays */
-      pinfo = parallel_for_for_prefix_sum1( pstate, iter, PrimInfo(empty), [&](GridMesh* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfo& base) -> PrimInfo {
-        return mesh->createPrimRefArray(prims,sgrids,r,base.size(),geomID);
-      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
-      assert(pinfo.size() == numPrimitives);
-      return pinfo;
-    }
-
-    PrimInfo createPrimRefArrayGrids(GridMesh* mesh, mvector<PrimRef>& prims, mvector<SubGridBuildData>& sgrids)
-    {
-      unsigned int geomID_ = std::numeric_limits<unsigned int>::max ();
-
-      PrimInfo pinfo(empty);
-      size_t numPrimitives = 0;
-      
-      ParallelPrefixSumState<PrimInfo> pstate;
-      /* iterate over all grids in a single mesh */
-      pinfo = parallel_prefix_sum( pstate, size_t(0), mesh->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo
-                                   {
-                                     PrimInfo pinfo(empty);
-                                     for (size_t j=r.begin(); j<r.end(); j++)
-                                     {
-                                       if (!mesh->valid(j)) continue;
-                                       BBox3fa bounds = empty;
-                                       const PrimRef prim(bounds,geomID_,unsigned(j));
-                                       pinfo.add_center2(prim,mesh->getNumSubGrids(j));
-                                     }
-                                     return pinfo;
-                                   }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
-      numPrimitives = pinfo.size();
-      /* resize arrays */
-      sgrids.resize(numPrimitives); 
-      prims.resize(numPrimitives); 
-
-      /* second run to fill primrefs and SubGridBuildData arrays */
-      pinfo = parallel_prefix_sum( pstate, size_t(0), mesh->size(), size_t(1024), PrimInfo(empty), [&](const range<size_t>& r, const PrimInfo& base) -> PrimInfo {
-        return mesh->createPrimRefArray(prims,sgrids,r,base.size(),geomID_);
-      }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
-
-      return pinfo;
-    }
-
-    PrimInfoMB createPrimRefArrayMSMBlurGrid(Scene* scene, mvector<PrimRefMB>& prims, mvector<SubGridBuildData>& sgrids, BuildProgressMonitor& progressMonitor, BBox1f t0t1)
-    {
-      /* first run to get #primitives */
-      ParallelForForPrefixSumState<PrimInfoMB> pstate;
-      Scene::Iterator<GridMesh,true> iter(scene);
-      
-      pstate.init(iter,size_t(1024));
-      /* iterate over all meshes in the scene */
-      PrimInfoMB pinfoMB = parallel_for_for_prefix_sum0( pstate, iter, PrimInfoMB(empty), [&](GridMesh* mesh, const range<size_t>& r, size_t k, size_t /*geomID*/) -> PrimInfoMB {
-                                                                                            
-         PrimInfoMB pinfoMB(empty);
-         for (size_t j=r.begin(); j<r.end(); j++)
-         {
-           if (!mesh->valid(j, mesh->timeSegmentRange(t0t1))) continue;
-           LBBox3fa bounds(empty);
-           PrimInfoMB gridMB(0,mesh->getNumSubGrids(j));
-           pinfoMB.merge(gridMB);
-         }
-         return pinfoMB;
-      }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
-      
-      size_t numPrimitives = pinfoMB.size();
-      if (numPrimitives == 0) return pinfoMB;
-      
-      /* resize arrays */
-      sgrids.resize(numPrimitives); 
-      prims.resize(numPrimitives); 
-      /* second run to fill primrefs and SubGridBuildData arrays */
-      pinfoMB = parallel_for_for_prefix_sum1( pstate, iter, PrimInfoMB(empty), [&](GridMesh* mesh, const range<size_t>& r, size_t k, size_t geomID, const PrimInfoMB& base) -> PrimInfoMB {
-        return mesh->createPrimRefMBArray(prims,sgrids,t0t1,r,base.size(),(unsigned)geomID);                                                                                 
-      }, [](const PrimInfoMB& a, const PrimInfoMB& b) -> PrimInfoMB { return PrimInfoMB::merge2(a,b); });
-      
-      assert(pinfoMB.size() == numPrimitives);
-      pinfoMB.time_range = t0t1;
-      return pinfoMB;
-    }
+    IF_ENABLED_TRIS (template PrimInfo createPrimRefArray<TriangleMesh>(TriangleMesh* mesh COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_QUADS(template PrimInfo createPrimRefArray<QuadMesh>(QuadMesh* mesh COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_HAIR (template PrimInfo createPrimRefArray<NativeCurves>(NativeCurves* mesh COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_LINES(template PrimInfo createPrimRefArray<LineSegments>(LineSegments* mesh COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER (template PrimInfo createPrimRefArray<AccelSet>(AccelSet* mesh COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
     
-#endif
+    IF_ENABLED_TRIS (template PrimInfo createGroupPrimRefArray<TriangleMesh>(GeometryGroup* group COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_QUADS(template PrimInfo createGroupPrimRefArray<QuadMesh>(GeometryGroup* group COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_HAIR (template PrimInfo createGroupPrimRefArray<NativeCurves>(GeometryGroup* group COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_LINES(template PrimInfo createGroupPrimRefArray<LineSegments>(GeometryGroup* group COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER (template PrimInfo createGroupPrimRefArray<AccelSet>(GeometryGroup* group COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
     
-    // ====================================================================================================
-    // ====================================================================================================
-    // ====================================================================================================
-    
+    IF_ENABLED_TRIS (template PrimInfo createPrimRefArray<TriangleMesh COMMA false>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_TRIS (template PrimInfo createPrimRefArray<TriangleMesh COMMA true>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_QUADS(template PrimInfo createPrimRefArray<QuadMesh COMMA false>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_QUADS(template PrimInfo createPrimRefArray<QuadMesh COMMA true>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_HAIR (template PrimInfo createPrimRefArray<NativeCurves COMMA false>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_LINES(template PrimInfo createPrimRefArray<LineSegments COMMA false>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_LINES(template PrimInfo createPrimRefArray<LineSegments COMMA true>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER(template PrimInfo createPrimRefArray<AccelSet COMMA false>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER(template PrimInfo createPrimRefArray<AccelSet COMMA true>(Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+
+    IF_ENABLED_TRIS (template PrimInfo createPrimRefArrayMBlur<TriangleMesh>(size_t timeSegment COMMA Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_QUADS(template PrimInfo createPrimRefArrayMBlur<QuadMesh>(size_t timeSegment COMMA Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_LINES(template PrimInfo createPrimRefArrayMBlur<LineSegments>(size_t timeSegment COMMA Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER(template PrimInfo createPrimRefArrayMBlur<AccelSet>(size_t timeSegment COMMA Scene* scene COMMA mvector<PrimRef>& prims COMMA BuildProgressMonitor& progressMonitor));
+
+    template PrimInfoMB createPrimRefArrayMSMBlur<TriangleMesh>(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1);
+    template PrimInfoMB createPrimRefArrayMSMBlur<QuadMesh>(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1);
+    template PrimInfoMB createPrimRefArrayMSMBlur<NativeCurves>(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1);
+    template PrimInfoMB createPrimRefArrayMSMBlur<LineSegments>(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1);
+    template PrimInfoMB createPrimRefArrayMSMBlur<AccelSet>(Scene* scene, mvector<PrimRefMB>& prims, BuildProgressMonitor& progressMonitor, BBox1f t0t1);
+
     IF_ENABLED_TRIS (template size_t createMortonCodeArray<TriangleMesh>(TriangleMesh* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
     IF_ENABLED_QUADS(template size_t createMortonCodeArray<QuadMesh>(QuadMesh* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
-    IF_ENABLED_USER (template size_t createMortonCodeArray<UserGeometry>(UserGeometry* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
-    IF_ENABLED_INSTANCE (template size_t createMortonCodeArray<Instance>(Instance* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
-    IF_ENABLED_INSTANCE_ARRAY (template size_t createMortonCodeArray<InstanceArray>(InstanceArray* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
+    IF_ENABLED_USER (template size_t createMortonCodeArray<AccelSet>(AccelSet* mesh COMMA mvector<BVHBuilderMorton::BuildPrim>& morton COMMA BuildProgressMonitor& progressMonitor));
   }
 }

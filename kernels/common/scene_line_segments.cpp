@@ -19,34 +19,34 @@
 
 namespace embree
 {
-namespace isa
-{
-  LineSegments::LineSegments (Scene* parent, RTCGeometryFlags flags, size_t numPrimitives, size_t numVertices, size_t numTimeSteps)
-    : Geometry(parent,LINE_SEGMENTS,numPrimitives,numTimeSteps,flags)
+#if defined(EMBREE_LOWEST_ISA)
+
+  LineSegments::LineSegments (Scene* scene, RTCGeometryFlags flags, size_t numPrimitives, size_t numVertices, size_t numTimeSteps)
+    : Geometry(scene,LINE_SEGMENTS,numPrimitives,numTimeSteps,flags)
   {
-    segments.init(parent->device,numPrimitives,sizeof(int));
+    segments.init(scene->device,numPrimitives,sizeof(int));
     vertices.resize(numTimeSteps);
     for (size_t i=0; i<numTimeSteps; i++) {
-      vertices[i].init(parent->device,numVertices,sizeof(Vec3fa));
+      vertices[i].init(scene->device,numVertices,sizeof(Vec3fa));
     }
     enabling();
   }
 
   void LineSegments::enabling()
   {
-    if (numTimeSteps == 1) parent->world.numLineSegments += numPrimitives;
-    else                   parent->worldMB.numLineSegments += numPrimitives;
+    if (numTimeSteps == 1) scene->world.numLineSegments += numPrimitives;
+    else                   scene->worldMB.numLineSegments += numPrimitives;
   }
 
   void LineSegments::disabling()
   {
-    if (numTimeSteps == 1) parent->world.numLineSegments -= numPrimitives;
-    else                   parent->worldMB.numLineSegments -= numPrimitives;
+    if (numTimeSteps == 1) scene->world.numLineSegments -= numPrimitives;
+    else                   scene->worldMB.numLineSegments -= numPrimitives;
   }
 
   void LineSegments::setMask (unsigned mask)
   {
-    if (parent->isStatic() && parent->isBuild())
+    if (scene->isStatic() && scene->isBuild())
       throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
 
     this->mask = mask;
@@ -55,7 +55,7 @@ namespace isa
 
   void LineSegments::setBuffer(RTCBufferType type, void* ptr, size_t offset, size_t stride, size_t size)
   {
-    if (parent->isStatic() && parent->isBuild())
+    if (scene->isStatic() && scene->isBuild())
       throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
 
     /* verify that all accesses are 4 bytes aligned */
@@ -73,7 +73,7 @@ namespace isa
     else if (type >= RTC_USER_VERTEX_BUFFER0 && type < RTC_USER_VERTEX_BUFFER0+RTC_MAX_USER_VERTEX_BUFFERS)
     {
       if (bid >= userbuffers.size()) userbuffers.resize(bid+1);
-      userbuffers[bid] = APIBuffer<char>(parent->device,numVertices(),stride);
+      userbuffers[bid] = APIBuffer<char>(scene->device,numVertices(),stride);
       userbuffers[bid].set(ptr,offset,stride,size);
       userbuffers[bid].checkPadding16();
     }
@@ -90,16 +90,16 @@ namespace isa
 
   void* LineSegments::map(RTCBufferType type)
   {
-    if (parent->isStatic() && parent->isBuild()) {
+    if (scene->isStatic() && scene->isBuild()) {
       throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
       return nullptr;
     }
 
     if (type == RTC_INDEX_BUFFER) {
-      return segments.map(parent->numMappedBuffers);
+      return segments.map(scene->numMappedBuffers);
     }
     else if (type >= RTC_VERTEX_BUFFER0 && type < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) {
-      return vertices[type - RTC_VERTEX_BUFFER0].map(parent->numMappedBuffers);
+      return vertices[type - RTC_VERTEX_BUFFER0].map(scene->numMappedBuffers);
     }
     else {
       throw_RTCError(RTC_INVALID_ARGUMENT,"unknown buffer type"); 
@@ -109,14 +109,14 @@ namespace isa
 
   void LineSegments::unmap(RTCBufferType type)
   {
-    if (parent->isStatic() && parent->isBuild())
+    if (scene->isStatic() && scene->isBuild())
       throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
 
     if (type == RTC_INDEX_BUFFER) {
-      segments.unmap(parent->numMappedBuffers);
+      segments.unmap(scene->numMappedBuffers);
     }
     else if (type >= RTC_VERTEX_BUFFER0 && type < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) {
-      vertices[type - RTC_VERTEX_BUFFER0].unmap(parent->numMappedBuffers);
+      vertices[type - RTC_VERTEX_BUFFER0].unmap(scene->numMappedBuffers);
       vertices0 = vertices[0];
     }
     else {
@@ -126,8 +126,8 @@ namespace isa
 
   void LineSegments::immutable ()
   {
-    const bool freeIndices  = !parent->needLineIndices;
-    const bool freeVertices = !parent->needLineVertices;
+    const bool freeIndices  = !scene->needLineIndices;
+    const bool freeVertices = !scene->needLineVertices;
     if (freeIndices) segments.free();
     if (freeVertices )
       for (auto& buffer : vertices)
@@ -163,7 +163,7 @@ namespace isa
   {
     /* test if interpolation is enabled */
 #if defined(DEBUG)
-    if ((parent->aflags & RTC_INTERPOLATE) == 0)
+    if ((scene->aflags & RTC_INTERPOLATE) == 0)
       throw_RTCError(RTC_INVALID_OPERATION,"rtcInterpolate can only get called when RTC_INTERPOLATE is enabled for the scene");
 #endif
 
@@ -193,5 +193,50 @@ namespace isa
       if (ddPdudu) vfloatx::storeu(valid,dPdu+i,vfloatx(zero));
     }
   }
-}
+#endif
+
+  namespace isa
+  {
+    LineSegments* createLineSegments(Scene* scene, RTCGeometryFlags flags, size_t numSegments, size_t numVertices, size_t numTimeSteps) {
+      return new LineSegmentsISA(scene,flags,numSegments,numVertices,numTimeSteps);
+    }
+
+    LBBox3fa LineSegmentsISA::virtualLinearBounds(size_t primID, const BBox1f& time_range) const 
+    {
+      if (numTimeSteps == 1)
+        return LBBox3fa(bounds(primID));
+      else
+        return linearBounds(primID,time_range);
+    }
+
+    PrimInfo LineSegmentsISA::createPrimRefArray(mvector<PrimRef>& prims, const range<size_t>& src, size_t dst)
+    {
+      PrimInfo pinfo(empty);
+      Leaf::Type ty = leafType();
+      for (size_t j=src.begin(); j<src.end(); j++)
+      {
+        BBox3fa bounds = empty;
+        if (!buildBounds(j,&bounds)) continue;
+        const PrimRef prim(bounds,ty,geomID,unsigned(j));
+        pinfo.add_center2(prim);
+        prims[dst++] = prim;
+      }
+      return pinfo;
+    }
+
+    PrimInfoMB LineSegmentsISA::createPrimRefArrayMB(mvector<PrimRefMB>& prims, const BBox1f t0t1, const range<size_t>& src, size_t dst) 
+    {
+      PrimInfoMB pinfo(empty);
+      Leaf::Type ty = leafType();
+      for (size_t j=src.begin(); j<src.end(); j++)
+      {
+        LBBox3fa bounds = empty;
+        if (!linearBoundsSafe(j,t0t1,bounds)) continue;
+        const PrimRefMB prim(bounds,numTimeSegments(),numTimeSegments(),ty,geomID,unsigned(j));
+        pinfo.add_primref(prim);
+        prims[dst++] = prim;
+      }
+      return pinfo;
+    }
+  }
 }

@@ -22,117 +22,16 @@
 
 namespace embree
 {
-namespace isa
-{
-  struct BezierPrim // FIXME: rename to BezierRef, remove!!!
-  {
-  public:
-
-    /*! Default constructor. */
-    __forceinline BezierPrim () {}
-
-    /*! Construction from vertices and IDs. */
-    __forceinline BezierPrim (bool hair,
-                              const Vec3fa& p0, const Vec3fa& p1, const Vec3fa& p2, const Vec3fa& p3, const int N,
-                              const unsigned int geomID, const unsigned int primID)
-      : p0(p0), p1(p1), p2(p2), p3(p3), N(N), geom(geomID), prim(primID), hair(hair) {}
-
-    /*! access hidden members */
-    __forceinline unsigned int primID() const { 
-      return prim;
-    }
-    __forceinline unsigned int geomID() const { 
-      return geom; 
-    }
-
-    /*! calculate the center of the curve */
-    __forceinline const Vec3fa center2() const {
-      return p0+p3;
-    }
-
-    /*! calculate the center of the curve */
-    __forceinline const Vec3fa center2(const AffineSpace3fa& space) const {
-      return xfmPoint(space,p0)+xfmPoint(space,p3);
-    }
-
-    /*! calculate the bounds of the curve */
-    __forceinline const BBox3fa bounds() const 
-    {
-      const Curve3fa curve(p0,p1,p2,p3);
-      if (likely(hair)) return curve.tessellatedBounds(N);
-      else              return curve.accurateBounds();
-    }
-
-    /*! size for bin heuristic is 1 */
-    __forceinline unsigned size() const { 
-      return 1;
-    }
-
-    /*! returns bounds and centroid used for binning */
-    __forceinline void binBoundsAndCenter(BBox3fa& bounds_o, Vec3fa& center_o) const 
-    {
-      bounds_o = bounds();
-      center_o = embree::center2(bounds_o);
-    }
-
-    /*! calculate bounds in specified coordinate space */
-    __forceinline const BBox3fa bounds(const AffineSpace3fa& space) const 
-    {
-      Vec3fa b0 = xfmPoint(space,p0); b0.w = p0.w;
-      Vec3fa b1 = xfmPoint(space,p1); b1.w = p1.w;
-      Vec3fa b2 = xfmPoint(space,p2); b2.w = p2.w;
-      Vec3fa b3 = xfmPoint(space,p3); b3.w = p3.w;
-      const Curve3fa curve(b0,b1,b2,b3);
-      if (likely(hair)) return curve.tessellatedBounds(N);
-      else              return curve.accurateBounds();
-    }
-    
-    /*! returns bounds and centroid used for binning */
-    __forceinline void binBoundsAndCenter(BBox3fa& bounds_o, Vec3fa& center_o, const AffineSpace3fa& space, void* user) const 
-    {
-      bounds_o = bounds(space);
-      center_o = embree::center2(bounds_o);
-    }
-
-    __forceinline uint64_t id64() const {
-      return (((uint64_t)prim) << 32) + (uint64_t)geom;
-    }
-
-    friend __forceinline bool operator<(const BezierPrim& p0, const BezierPrim& p1) {
-      return p0.id64() < p1.id64();
-    }
-
-    friend std::ostream& operator<<(std::ostream& cout, const BezierPrim& b) 
-    {
-      return std::cout << "BezierPrim { " << std::endl << 
-        " p0 = " << b.p0 << ", " << std::endl <<
-        " p1 = " << b.p1 << ", " << std::endl <<
-        " p2 = " << b.p2 << ", " << std::endl <<
-        " p3 = " << b.p3 << ",  " << std::endl <<
-        " N = " << b.N << ", " << std::endl <<
-        " geomID = " << b.geomID() << ", primID = " << b.primID() << std::endl << 
-      "}";
-    }
-    
-  public:
-    Vec3fa p0;            //!< 1st control point (x,y,z,r)
-    Vec3fa p1;            //!< 2nd control point (x,y,z,r)
-    Vec3fa p2;            //!< 3rd control point (x,y,z,r)
-    Vec3fa p3;            //!< 4th control point (x,y,z,r)
-    int N;                //!< tessellation rate
-    unsigned geom;        //!< geometry ID
-    unsigned prim;        //!< primitive ID
-    int hair;             //!< 0=surface, 1=hair
-  };
-
   struct Bezier1v
   {
     struct Type : public PrimitiveType 
     {
       Type ();
       size_t size(const char* This) const;
+      bool last(const char* This) const;
     };
-    static const Type& type();
+    static Type type;
+    static const Leaf::Type leaf_type = Leaf::TY_HAIR;
 
   public:
 
@@ -148,21 +47,21 @@ namespace isa
     __forceinline Bezier1v () {}
 
     /*! Construction from vertices and IDs. */
-    __forceinline Bezier1v (const Vec3fa& p0, const Vec3fa& p1, const Vec3fa& p2, const Vec3fa& p3, const unsigned int geomID, const unsigned int primID)
-      : p0(p0), p1(p1), p2(p2), p3(p3), geom(geomID), prim(primID) {}
+    __forceinline Bezier1v (const Vec3fa& p0, const Vec3fa& p1, const Vec3fa& p2, const Vec3fa& p3, const unsigned int geomID, const unsigned int primID, const Leaf::Type ty, bool last)
+      : p0(p0), p1(p1), p2(p2), p3(p3), geom(Leaf::encode(ty,geomID,last)), prim(primID) {}
 
-    /*! return primitive ID */
-    __forceinline unsigned int primID() const { 
-      return prim;
-    }
+    /*! checks if this is the last primitive */
+    __forceinline unsigned last() const { return Leaf::decodeLast(geom); }
 
-    /*! return geometry ID */
-    __forceinline unsigned int geomID() const { 
-      return geom; 
-    }
+    /*! returns geometry ID */
+    __forceinline unsigned geomID() const { return Leaf::decodeID(geom); }
+
+    /*! returns primitive ID */
+    __forceinline unsigned primID() const { return prim; }
 
     /*! fill triangle from triangle list */
-    __forceinline void fill(const PrimRef* prims, size_t& i, size_t end, Scene* scene)
+    template<typename PrimRef>
+    __forceinline BBox3fa fill(const PrimRef* prims, size_t& i, size_t end, Scene* scene, bool last)
     {
       const PrimRef& prim = prims[i];
       i++;
@@ -174,34 +73,37 @@ namespace isa
       const Vec3fa& p1 = curves->vertex(id+1);
       const Vec3fa& p2 = curves->vertex(id+2);
       const Vec3fa& p3 = curves->vertex(id+3);
-      new (this) Bezier1v(p0,p1,p2,p3,geomID,primID);
+      new (this) Bezier1v(p0,p1,p2,p3,geomID,primID,Leaf::TY_HAIR,last);
+      return curves->bounds(primID);
     }
 
-    /*! fill triangle from triangle list */
-    __forceinline void fill(const BezierPrim* prims, size_t& i, size_t end, Scene* scene) 
+    template<typename BVH>
+    __forceinline static typename BVH::NodeRef createLeaf(const FastAllocator::CachedAllocator& alloc, PrimRef* prims, const range<size_t>& range, BVH* bvh)
     {
-      new (this) Bezier1v(prims[i].p0,prims[i].p1,prims[i].p2,prims[i].p3,prims[i].geom,prims[i].prim);
-      i++;
+      size_t cur = range.begin();
+      size_t items = blocks(range.size());
+      Bezier1v* accel = (Bezier1v*) alloc.malloc1(items*sizeof(Bezier1v),BVH::byteAlignment);
+      for (size_t i=0; i<items; i++) {
+        accel[i].fill(prims,cur,range.end(),bvh->scene,i==(items-1));
+      }
+      return BVH::encodeLeaf((char*)accel,Leaf::TY_HAIR);
     }
 
-    /*! calculate the center of the curve */
-    __forceinline const Vec3fa center2() const {
-      return p0+p3;
+    template<typename BVH>
+    __forceinline static const typename BVH::NodeRecordMB4D createLeafMB (const SetMB& set, const FastAllocator::CachedAllocator& alloc, BVH* bvh)
+    {
+      size_t items = blocks(set.object_range.size());
+      size_t start = set.object_range.begin();
+      Bezier1v* accel = (Bezier1v*) alloc.malloc1(items*sizeof(Bezier1v),BVH::byteAlignment);
+      typename BVH::NodeRef node = bvh->encodeLeaf((char*)accel,Leaf::TY_HAIR);
+      LBBox3fa allBounds = empty;
+      for (size_t i=0; i<items; i++) {
+        const BBox3fa b = accel[i].fill(set.prims->data(),start,set.object_range.end(),bvh->scene,i==(items-1));
+        allBounds.extend(LBBox3fa(b));
+      }
+      return typename BVH::NodeRecordMB4D(node,allBounds,set.time_range,0.0f,items);
     }
-
-    /*! calculate the center of the curve */
-    __forceinline const Vec3fa center2(const AffineSpace3fa& space) const {
-      return xfmPoint(space,p0)+xfmPoint(space,p3);
-    }
-
-    __forceinline uint64_t id64() const {
-      return (((uint64_t)prim) << 32) + (uint64_t)geom;
-    }
-
-    friend __forceinline bool operator<(const Bezier1v& p0, const Bezier1v& p1) {
-      return p0.id64() < p1.id64();
-    }
-
+    
     friend std::ostream& operator<<(std::ostream& cout, const Bezier1v& b) 
     {
       return std::cout << "Bezier1v { " << std::endl << 
@@ -218,8 +120,8 @@ namespace isa
     Vec3fa p1;            //!< 2nd control point (x,y,z,r)
     Vec3fa p2;            //!< 3rd control point (x,y,z,r)
     Vec3fa p3;            //!< 4th control point (x,y,z,r)
+  private:
     unsigned geom;      //!< geometry ID
     unsigned prim;      //!< primitive ID
   };
-}
 }

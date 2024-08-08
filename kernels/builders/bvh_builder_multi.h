@@ -24,199 +24,16 @@
 #include "heuristic_binning_array_aligned.h"
 #include "heuristic_timesplit_array.h"
 
+#include "bvh_builder_hair.h"
+#include "bvh_builder_msmblur_hair.h"
+
 namespace embree
 {
   namespace isa
   {
-    template<typename T>
-      struct SharedVector
-      {
-        __forceinline SharedVector() {}
-
-        __forceinline SharedVector(T* ptr, size_t refCount = 1)
-          : prims(ptr), refCount(refCount) {}
-
-        __forceinline void incRef() {
-          refCount++;
-        }
-
-        __forceinline void decRef()
-        {
-          if (--refCount == 0)
-            delete prims;
-        }
-
-        T* prims;
-        size_t refCount;
-      };
-
-    template<typename BuildRecord, int MAX_BRANCHING_FACTOR>
-      struct LocalChildListT
-      {
-        typedef SharedVector<mvector<PrimRefMB>> SharedPrimRefVector;
-
-        __forceinline LocalChildListT (const BuildRecord& record)
-          : numChildren(1), numSharedPrimVecs(1)
-        {
-          /* the local root will be freed in the ancestor where it was created (thus refCount is 2) */
-          children[0] = record;
-          primvecs[0] = new (&sharedPrimVecs[0]) SharedPrimRefVector(record.prims.prims, 2);
-        }
-
-        __forceinline ~LocalChildListT()
-        {
-          for (size_t i = 0; i < numChildren; i++)
-            primvecs[i]->decRef();
-        }
-
-        __forceinline BuildRecord& operator[] ( const size_t i ) {
-          return children[i];
-        }
-
-        __forceinline size_t size() const {
-          return numChildren;
-        }
-
-        __forceinline void split(ssize_t bestChild, const BuildRecord& lrecord, const BuildRecord& rrecord, std::unique_ptr<mvector<PrimRefMB>> new_vector)
-        {
-          SharedPrimRefVector* bsharedPrimVec = primvecs[bestChild];
-          if (lrecord.prims.prims == bsharedPrimVec->prims) {
-            primvecs[bestChild] = bsharedPrimVec;
-            bsharedPrimVec->incRef();
-          }
-          else {
-            primvecs[bestChild] = new (&sharedPrimVecs[numSharedPrimVecs++]) SharedPrimRefVector(lrecord.prims.prims);
-          }
-
-          if (rrecord.prims.prims == bsharedPrimVec->prims) {
-            primvecs[numChildren] = bsharedPrimVec;
-            bsharedPrimVec->incRef();
-          }
-          else {
-            primvecs[numChildren] = new (&sharedPrimVecs[numSharedPrimVecs++]) SharedPrimRefVector(rrecord.prims.prims);
-          }
-          bsharedPrimVec->decRef();
-          new_vector.release();
-
-          children[bestChild] = lrecord;
-          children[numChildren] = rrecord;
-          numChildren++;
-        }
-
-        __forceinline void sort() {
-          std::sort(children.begin(),children.begin()+numChildren,std::greater<BuildRecord>());
-        }
-
-      public:
-        array_t<BuildRecord,MAX_BRANCHING_FACTOR> children;
-        array_t<SharedPrimRefVector*,MAX_BRANCHING_FACTOR> primvecs;
-        size_t numChildren;
-
-        array_t<SharedPrimRefVector,2*MAX_BRANCHING_FACTOR> sharedPrimVecs;
-        size_t numSharedPrimVecs;
-      };
-
-    template<typename Mesh>
-      struct RecalculatePrimRef
-      {
-        Scene* scene;
-
-        __forceinline RecalculatePrimRef (Scene* scene)
-          : scene(scene) {}
-
-        __forceinline PrimRefMB operator() (const PrimRefMB& prim, const BBox1f time_range) const
-        {
-          const unsigned geomID = prim.geomID();
-          const unsigned primID = prim.primID();
-          const Mesh* mesh = scene->get<Mesh>(geomID);
-          const LBBox3fa lbounds = mesh->linearBounds(primID, time_range);
-          const unsigned num_time_segments = mesh->numTimeSegments();
-          const range<int> tbounds = getTimeSegmentRange(time_range, (float)num_time_segments);
-          return PrimRefMB (lbounds, tbounds.size(), num_time_segments, prim.type(), geomID, primID);
-        }
-
-        // __noinline is workaround for ICC16 bug under MacOSX
-        __noinline PrimRefMB operator() (const PrimRefMB& prim, const BBox1f time_range, const LinearSpace3fa& space) const
-        {
-          const unsigned geomID = prim.geomID();
-          const unsigned primID = prim.primID();
-          const Mesh* mesh = scene->get<Mesh>(geomID);
-          const LBBox3fa lbounds = mesh->linearBounds(space, primID, time_range);
-          const unsigned num_time_segments = mesh->numTimeSegments();
-          const range<int> tbounds = getTimeSegmentRange(time_range, (float)num_time_segments);
-          return PrimRefMB (lbounds, tbounds.size(), num_time_segments, prim.type(), geomID, primID);
-        }
-
-        __forceinline LBBox3fa linearBounds(const PrimRefMB& prim, const BBox1f time_range) const {
-          return scene->get<Mesh>(prim.geomID())->linearBounds(prim.primID(), time_range);
-        }
-
-        // __noinline is workaround for ICC16 bug under MacOSX
-        __noinline LBBox3fa linearBounds(const PrimRefMB& prim, const BBox1f time_range, const LinearSpace3fa& space) const {
-          return scene->get<Mesh>(prim.geomID())->linearBounds(space, prim.primID(), time_range);
-        }
-      };
-
-    struct VirtualRecalculatePrimRef
+    struct BVHBuilderMulti
     {
-      Scene* scene;
-      
-      __forceinline VirtualRecalculatePrimRef (Scene* scene)
-        : scene(scene) {}
-      
-      __forceinline PrimRefMB operator() (const PrimRefMB& prim, const BBox1f time_range) const
-      {
-        const unsigned geomID = prim.geomID();
-        const unsigned primID = prim.primID();
-        const Geometry* mesh = scene->get(geomID);
-        const LBBox3fa lbounds = mesh->virtualLinearBounds(primID, time_range);
-        const unsigned num_time_segments = mesh->numTimeSegments();
-        const range<int> tbounds = getTimeSegmentRange(time_range, num_time_segments);
-        return PrimRefMB (lbounds, tbounds.size(), num_time_segments, prim.type(), geomID, primID);
-      }
-
-      __forceinline PrimRefMB operator() (const PrimRefMB& prim, const BBox1f time_range, const LinearSpace3fa& space) const
-      {
-        const unsigned geomID = prim.geomID();
-        const unsigned primID = prim.primID();
-        const Geometry* geom = scene->get(geomID);
-        const LBBox3fa lbounds = geom->virtualLinearBounds(space, primID, time_range);
-        const unsigned num_time_segments = geom->numTimeSegments();
-        const range<int> tbounds = getTimeSegmentRange(time_range, (float)num_time_segments);
-        return PrimRefMB (lbounds, tbounds.size(), num_time_segments, prim.type(), geomID, primID);
-      }
-
-      __forceinline LBBox3fa linearBounds(const PrimRefMB& prim, const BBox1f time_range) const {
-        return scene->get(prim.geomID())->virtualLinearBounds(prim.primID(), time_range);
-      }
-
-      __forceinline LBBox3fa linearBounds(const PrimRefMB& prim, const BBox1f time_range, const LinearSpace3fa& space) const {
-        return scene->get(prim.geomID())->virtualLinearBounds(space, prim.primID(), time_range);
-      }
-    };
-    
-    struct BVHBuilderMSMBlur
-    {
-      /*! settings for msmblur builder */
-      struct Settings
-      {
-        /*! default settings */
-        Settings ()
-        : branchingFactor(2), maxDepth(32), logBlockSize(0), minLeafSize(1), maxLeafSize(8),
-          travCost(1.0f), intCost(1.0f), singleLeafTimeSegment(false),
-          singleThreadThreshold(1024) {}
-
-      public:
-        size_t branchingFactor;  //!< branching factor of BVH to build
-        size_t maxDepth;         //!< maximal depth of BVH to build
-        size_t logBlockSize;     //!< log2 of blocksize for SAH heuristic
-        size_t minLeafSize;      //!< minimal size of a leaf
-        size_t maxLeafSize;      //!< maximal size of a leaf
-        float travCost;          //!< estimated cost of one traversal step
-        float intCost;           //!< estimated cost of one primitive intersection
-        bool singleLeafTimeSegment; //!< split time to single time range
-        size_t singleThreadThreshold; //!< threshold when we switch to single threaded build
-      };
+      typedef CommonBuildSettings Settings;
 
       struct BuildRecord
       {
@@ -229,8 +46,8 @@ namespace embree
         __forceinline BuildRecord (const SetMB& prims, size_t depth)
           : depth(depth), prims(prims) {}
 
-        __forceinline friend bool operator< (const BuildRecord& a, const BuildRecord& b) {
-          return a.prims.size() < b.prims.size();
+        __forceinline friend bool operator> (const BuildRecord& a, const BuildRecord& b) {
+          return a.prims.size() > b.prims.size();
         }
 
         __forceinline size_t size() const {
@@ -260,8 +77,14 @@ namespace embree
         typename RecalculatePrimRef,
         typename Allocator,
         typename CreateAllocFunc,
-        typename CreateNodeFunc,
-        typename SetNodeFunc,
+        typename CreateAlignedNodeFunc,
+        typename SetAlignedNodeFunc,
+        typename CreateAlignedNodeMBFunc,
+        typename SetAlignedNodeMBFunc,
+        typename CreateUnalignedNodeFunc,
+        typename SetUnalignedNodeFunc,
+        typename CreateUnalignedNodeMBFunc,
+        typename SetUnalignedNodeMBFunc,
         typename CreateLeafFunc,
         typename ProgressMonitor>
 
@@ -280,30 +103,68 @@ namespace embree
 
         public:
 
-          BuilderT (MemoryMonitorInterface* device,
+          BuilderT (Scene* scene,
                     const RecalculatePrimRef recalculatePrimRef,
                     const CreateAllocFunc createAlloc,
-                    const CreateNodeFunc createNode,
-                    const SetNodeFunc setNode,
-                    const CreateLeafFunc createLeaf,
+                    const CreateAlignedNodeFunc createAlignedNode,
+                    const SetAlignedNodeFunc setAlignedNode,
+                    const CreateAlignedNodeMBFunc createAlignedNodeMB,
+                    const SetAlignedNodeMBFunc setAlignedNodeMB,
+                    const CreateUnalignedNodeFunc createUnalignedNode,
+                    const SetUnalignedNodeFunc setUnalignedNode,
+                    const CreateUnalignedNodeMBFunc createUnalignedNodeMB,
+                    const SetUnalignedNodeMBFunc setUnalignedNodeMB,
+                    const CreateLeafFunc& createLeaf,
                     const ProgressMonitor progressMonitor,
-                    const Settings& settings)
-            : cfg(settings),
+                    const Settings& default_settings,
+                    const Settings* type_settings)
+            : default_settings(default_settings),
+            type_settings(type_settings),
+            scene(scene),
             heuristicObjectSplit(),
-            heuristicTemporalSplit(device, recalculatePrimRef),
-            recalculatePrimRef(recalculatePrimRef), createAlloc(createAlloc), createNode(createNode), setNode(setNode), createLeaf(createLeaf),
+            heuristicTemporalSplit(scene->device, recalculatePrimRef),
+            recalculatePrimRef(recalculatePrimRef), createAlloc(createAlloc), 
+            createAlignedNode(createAlignedNode), setAlignedNode(setAlignedNode), createAlignedNodeMB(createAlignedNodeMB), setAlignedNodeMB(setAlignedNodeMB), 
+            createUnalignedNode(createUnalignedNode), setUnalignedNode(setUnalignedNode), createUnalignedNodeMB(createUnalignedNodeMB), setUnalignedNodeMB(setUnalignedNodeMB), 
+            createLeaf(createLeaf),
             progressMonitor(progressMonitor)
           {
-            if (cfg.branchingFactor > MAX_BRANCHING_FACTOR)
+            if (default_settings.branchingFactor > MAX_BRANCHING_FACTOR)
               throw_RTCError(RTC_UNKNOWN_ERROR,"bvh_builder: branching factor too large");
+          }
+
+          const Settings& getSettings(unsigned type_mask) const 
+          {
+            /* if only one bit is set use that types settings */
+            if (((type_mask-1) & type_mask) == 0) 
+              return type_settings[Leaf::selectTy(type_mask)];
+            
+            /* otherwise use the default settings */
+            else return default_settings;
           }
 
           /*! finds the best split */
           const Split find(const SetMB& set)
           {
+            const Settings& cfg = getSettings(set.types);
+
+            /* split out hair when approaching leaf level */
+            if (set.hasType(Leaf::TY_HAIR) && !set.oneType() && set.size() < 200) {
+              return Split(0.0f,Split::SPLIT_TYPE,Leaf::TY_HAIR);
+            }
+
+            /* split out hair when approaching leaf level */
+            if (set.hasType(Leaf::TY_HAIR_MB) && !set.oneType() && set.size() < 200) {
+              return Split(0.0f,Split::SPLIT_TYPE,Leaf::TY_HAIR_MB);
+            }
+               
             /* first try standard object split */
             const Split object_split = heuristicObjectSplit.find(set,cfg.logBlockSize);
             const float object_split_sah = object_split.splitSAH();
+
+            /* if there is no motion blur geometry return object split */
+            if (!set.hasMBlur())
+              return object_split;
 
             /* test temporal splits only when object split was bad */
             const float leaf_sah = set.leafSAH(cfg.logBlockSize);
@@ -342,7 +203,7 @@ namespace embree
             }
             /* perform type split */
             else if (unlikely(split.data == Split::SPLIT_TYPE)) {
-              splitByType(set,lset,rset);
+              splitByType(set,lset,rset,(Leaf::Type)split.dim);
             }
             else
               assert(false);
@@ -365,6 +226,8 @@ namespace embree
           /*! finds the best fallback split */
           __noinline Split findFallback(const SetMB& set)
           {
+            const Settings& cfg = getSettings(set.types);
+
             if (set.size() == 0)
               return Split(0.0f,Split::SPLIT_NONE);
 
@@ -385,8 +248,9 @@ namespace embree
             }
 
             /* if primitives are of different type perform type splits */
-            if (!set.oneType())
-              return Split(0.0f,Split::SPLIT_TYPE);
+            if (!set.oneType()) {
+              return Split(0.0f,Split::SPLIT_TYPE,Leaf::selectTy(set.types));
+            }
 
             /* if the leaf is too large we also have to perform additional splits */
             if (set.size() > cfg.maxLeafSize)
@@ -418,14 +282,12 @@ namespace embree
           }
 
           /*! split by primitive type */
-          void splitByType(const SetMB& set, SetMB& lset, SetMB& rset)
+          void splitByType(const SetMB& set, SetMB& lset, SetMB& rset, const Leaf::Type type)
           {
-            assert(set.size());
             mvector<PrimRefMB>& prims = *set.prims;
             const size_t begin = set.object_range.begin();
             const size_t end   = set.object_range.end();
-          
-            Leaf::Type type = prims[begin].type();
+            
             PrimInfoMB linfo = empty;
             PrimInfoMB rinfo = empty;
             size_t center = serial_partitioning(prims.data(),begin,end,linfo,rinfo,
@@ -438,6 +300,8 @@ namespace embree
 
           const NodeRecordMB4D createLargeLeaf(const BuildRecord& in, Allocator alloc)
           {
+            const Settings& cfg = getSettings(in.prims.types);
+         
             /* this should never occur but is a fatal error */
             if (in.depth > cfg.maxDepth)
               throw_RTCError(RTC_UNKNOWN_ERROR,"depth limit reached");
@@ -447,7 +311,7 @@ namespace embree
 
             /* create leaf for few primitives */
             if (current.split.data == Split::SPLIT_NONE)
-              return createLeaf(current,alloc);
+              return createLeaf(current.prims,alloc);
 
             /* fill all children by always splitting the largest one */
             bool hasTimeSplits = false;
@@ -486,26 +350,100 @@ namespace embree
 
             } while (children.size() < cfg.branchingFactor);
 
-            /* create node */
-            auto node = createNode(alloc, hasTimeSplits);
-
             /* recurse into each child and perform reduction */
-            LBBox3fa gbounds = empty;
             for (size_t i=0; i<children.size(); i++) {
               values[i] = createLargeLeaf(children[i],alloc);
-              gbounds.extend(values[i].lbounds);
-              setNode(node,i,values[i]);
             }
 
-            /* calculate geometry bounds of this node */
-            if (hasTimeSplits)
-              return NodeRecordMB4D(node,current.prims.linearBounds(recalculatePrimRef),current.prims.time_range);
+            float area = 0.0f, cost = 0.0f;
+            for (size_t i=0; i<children.size(); i++) {
+              area += values[i].area;
+              cost += values[i].cost;
+            }
+
+            if (hasTimeSplits || useNodeMB(values,children.size())) 
+            {
+              auto node = createAlignedNodeMB(alloc, hasTimeSplits);
+              LBBox3fa gbounds = empty;
+              for (size_t i=0; i<children.size(); i++) {
+                setAlignedNodeMB(node,i,values[i]);
+                gbounds.extend(values[i].lbounds);
+              }
+              
+              if (unlikely(hasTimeSplits))
+                gbounds = current.prims.linearBounds(recalculatePrimRef);
+
+              return NodeRecordMB4D(node,gbounds,current.prims.time_range,area,cost);
+            }
             else
-              return NodeRecordMB4D(node,gbounds,current.prims.time_range);
+            {
+              auto node = createAlignedNode(alloc);
+              LBBox3fa gbounds = empty;
+              for (size_t i=0; i<children.size(); i++) {
+                setAlignedNode(node,i,values[i].ref,values[i].lbounds.bounds());
+                gbounds.extend(values[i].lbounds);
+              }
+              return NodeRecordMB4D(node,gbounds,current.prims.time_range,area,cost);   
+            }          
+          }
+
+          __forceinline bool useNodeMB(NodeRecordMB4D values[MAX_BRANCHING_FACTOR], size_t N) const 
+          {
+            float lA = 0.0f;
+            float A = 0.0f;
+            for (size_t i=0; i<N; i++) {
+              lA += expectedApproxHalfArea(values[i].lbounds);
+              A  += halfArea(values[i].lbounds.bounds());
+            }
+            return lA <= 0.6f*A;
           }
 
           const NodeRecordMB4D recurse(const BuildRecord& current, Allocator alloc, bool toplevel)
           {
+            if (current.prims.isType(Leaf::TY_HAIR)) 
+            {
+              PrimRefMB* primsMB = current.prims.prims->data()+current.prims.object_range.begin();
+              PrimRef* prims = (PrimRef*) primsMB;
+              convert_PrimRefMBArray_To_PrimRefArray(primsMB,prims,current.prims.object_range.size());
+              NodeRef ref = BVHBuilderHair::build<NodeRef>
+                (createAlloc,
+                 createAlignedNode,
+                 setAlignedNode,
+                 createUnalignedNode,
+                 setUnalignedNode,
+                 createLeaf,
+                 progressMonitor,
+                 scene, prims, PrimInfo(0,current.prims.object_range.size(),current.prims),
+                 type_settings[Leaf::TY_HAIR]);
+              convert_PrimRefArray_To_PrimRefMBArray(prims,primsMB,current.prims.object_range.size());
+              return NodeRecordMB4D(ref,LBBox3fa(current.prims.geomBounds),current.prims.time_range,0.0f,4.0f*current.size());
+            }
+
+            if (current.prims.isType(Leaf::TY_HAIR_MB)) 
+            {
+              NodeRecordMB4D r = BVHBuilderHairMSMBlur::build<NodeRef>
+                (scene, *current.prims.prims, current.prims,
+                 recalculatePrimRef,
+                 createAlloc,
+                 createAlignedNode,
+                 setAlignedNode,
+                 createAlignedNodeMB,
+                 setAlignedNodeMB,
+                 createUnalignedNode,
+                 setUnalignedNode,
+                 createUnalignedNodeMB,
+                 setUnalignedNodeMB,
+                 createLeaf,
+                 createLeaf,
+                 progressMonitor,
+                 type_settings[Leaf::TY_HAIR_MB]);
+              r.area = 0.0f;
+              r.cost = 4.0f*current.size();
+              return r;
+            }
+
+            const Settings& cfg = getSettings(current.prims.types);
+
             /* get thread local allocator */
             if (!alloc)
               alloc = createAlloc();
@@ -566,12 +504,8 @@ namespace embree
             }
 
             /* sort buildrecords for simpler shadow ray traversal */
-            //std::sort(&children[0],&children[children.size()],std::greater<BuildRecord>()); // FIXME: reduces traversal performance of bvh8.triangle4 (need to verified) !!
-
-            /*! create an inner node */
-            auto node = createNode(alloc, hasTimeSplits);
-            LBBox3fa gbounds = empty;
-
+            //children.sort();
+            
             /* spawn tasks */
             if (unlikely(current.size() > cfg.singleThreadThreshold))
             {
@@ -579,14 +513,8 @@ namespace embree
               parallel_for(size_t(0), children.size(), [&] (const range<size_t>& r) {
                   for (size_t i=r.begin(); i<r.end(); i++) {
                     values[i] = recurse(children[i],nullptr,true);
-                    setNode(node,i,values[i]);
-                    _mm_mfence(); // to allow non-temporal stores during build
                   }
                 });
-
-              /*! merge bounding boxes */
-              for (size_t i=0; i<children.size(); i++)
-                gbounds.extend(values[i].lbounds);
             }
             /* recurse into each child */
             else
@@ -594,16 +522,52 @@ namespace embree
               //for (size_t i=0; i<children.size(); i++)
               for (ssize_t i=children.size()-1; i>=0; i--) {
                 values[i] = recurse(children[i],alloc,false);
-                gbounds.extend(values[i].lbounds);
-                setNode(node,i,values[i]);
               }
             }
+            
+            int order[MAX_BRANCHING_FACTOR];
+            for (size_t i=0; i<children.size(); i++) order[i] = i;
+#if 1
+            std::sort(order,order+children.size(),[&] ( const int a, const int b ) {
+                return values[a].area/values[a].cost < values[b].area/values[b].cost;
+                //return values[a].cost > values[b].cost;
+              });
+#else
+            std::sort(order,order+children.size(),[&] ( const int a, const int b ) {
+                return children[a].size() > children[b].size();
+              });
+#endif
+            
+            float area = 0.0f, cost = 0.0f;
+            for (size_t i=0; i<children.size(); i++) {
+              area += values[i].area;
+              cost += values[i].cost;
+            }
 
-            /* calculate geometry bounds of this node */
-            if (unlikely(hasTimeSplits))
-              return NodeRecordMB4D(node,current.prims.linearBounds(recalculatePrimRef),current.prims.time_range);
+            if (hasTimeSplits || useNodeMB(values,children.size())) 
+            {
+              auto node = createAlignedNodeMB(alloc, hasTimeSplits);
+              LBBox3fa gbounds = empty;
+              for (size_t i=0; i<children.size(); i++) {
+                setAlignedNodeMB(node,i,values[order[i]]);
+                gbounds.extend(values[i].lbounds);
+              }
+              
+              if (unlikely(hasTimeSplits))
+                gbounds = current.prims.linearBounds(recalculatePrimRef);
+
+              return NodeRecordMB4D(node,gbounds,current.prims.time_range,area,cost);
+            }
             else
-              return NodeRecordMB4D(node,gbounds,current.prims.time_range);
+            {
+              auto node = createAlignedNode(alloc);
+              LBBox3fa gbounds = empty;
+              for (size_t i=0; i<children.size(); i++) {
+                setAlignedNode(node,i,values[order[i]].ref,values[order[i]].lbounds.bounds());
+                gbounds.extend(values[i].lbounds);
+              }
+              return NodeRecordMB4D(node,gbounds,current.prims.time_range,area,cost);   
+            }     
           }
 
           /*! builder entry function */
@@ -616,54 +580,88 @@ namespace embree
           }
 
         private:
-          Settings cfg;
+          const Settings& default_settings;
+          const Settings* type_settings;
+          Scene* scene;
           HeuristicArrayBinningMB<PrimRefMB,MBLUR_NUM_OBJECT_BINS> heuristicObjectSplit;
           HeuristicMBlurTemporalSplit<PrimRefMB,RecalculatePrimRef,MBLUR_NUM_TEMPORAL_BINS> heuristicTemporalSplit;
           const RecalculatePrimRef recalculatePrimRef;
           const CreateAllocFunc createAlloc;
-          const CreateNodeFunc createNode;
-          const SetNodeFunc setNode;
-          const CreateLeafFunc createLeaf;
+          const CreateAlignedNodeFunc createAlignedNode;
+          const SetAlignedNodeFunc setAlignedNode;
+          const CreateAlignedNodeMBFunc createAlignedNodeMB;
+          const SetAlignedNodeMBFunc setAlignedNodeMB;
+          const CreateUnalignedNodeFunc createUnalignedNode;
+          const SetUnalignedNodeFunc setUnalignedNode;
+          const CreateUnalignedNodeMBFunc createUnalignedNodeMB;
+          const SetUnalignedNodeMBFunc setUnalignedNodeMB;
+          const CreateLeafFunc& createLeaf;
           const ProgressMonitor progressMonitor;
         };
 
       template<typename NodeRef,
         typename RecalculatePrimRef,
         typename CreateAllocFunc,
-        typename CreateNodeFunc,
-        typename SetNodeFunc,
+        typename CreateAlignedNodeFunc,
+        typename SetAlignedNodeFunc,
+        typename CreateAlignedNodeMBFunc,
+        typename SetAlignedNodeMBFunc,
+        typename CreateUnalignedNodeFunc,
+        typename SetUnalignedNodeFunc,
+        typename CreateUnalignedNodeMBFunc,
+        typename SetUnalignedNodeMBFunc,
         typename CreateLeafFunc,
         typename ProgressMonitorFunc>
 
         static const BVHNodeRecordMB4D<NodeRef> build(mvector<PrimRefMB>& prims,
                                                       const PrimInfoMB& pinfo,
-                                                      MemoryMonitorInterface* device,
+                                                      Scene* scene,
                                                       const RecalculatePrimRef recalculatePrimRef,
                                                       const CreateAllocFunc createAlloc,
-                                                      const CreateNodeFunc createNode,
-                                                      const SetNodeFunc setNode,
-                                                      const CreateLeafFunc createLeaf,
+                                                      const CreateAlignedNodeFunc createAlignedNode,
+                                                      const SetAlignedNodeFunc setAlignedNode,
+                                                      const CreateAlignedNodeMBFunc createAlignedNodeMB,
+                                                      const SetAlignedNodeMBFunc setAlignedNodeMB,
+                                                      const CreateUnalignedNodeFunc createUnalignedNode,
+                                                      const SetUnalignedNodeFunc setUnalignedNode,
+                                                      const CreateUnalignedNodeMBFunc createUnalignedNodeMB,
+                                                      const SetUnalignedNodeMBFunc setUnalignedNodeMB,
+                                                      const CreateLeafFunc& createLeaf,
                                                       const ProgressMonitorFunc progressMonitor,
-                                                      const Settings& settings)
+                                                      const Settings& default_settings,
+                                                      const Settings* type_settings)
       {
           typedef BuilderT<
             NodeRef,
             RecalculatePrimRef,
             decltype(createAlloc()),
             CreateAllocFunc,
-            CreateNodeFunc,
-            SetNodeFunc,
+            CreateAlignedNodeFunc,
+            SetAlignedNodeFunc,
+            CreateAlignedNodeMBFunc,
+            SetAlignedNodeMBFunc,
+            CreateUnalignedNodeFunc,
+            SetUnalignedNodeFunc,
+            CreateUnalignedNodeMBFunc,
+            SetUnalignedNodeMBFunc,
             CreateLeafFunc,
             ProgressMonitorFunc> Builder;
 
-          Builder builder(device,
+          Builder builder(scene,
                           recalculatePrimRef,
                           createAlloc,
-                          createNode,
-                          setNode,
+                          createAlignedNode,
+                          setAlignedNode,
+                          createAlignedNodeMB,
+                          setAlignedNodeMB,
+                          createUnalignedNode,
+                          setUnalignedNode,
+                          createUnalignedNodeMB,
+                          setUnalignedNodeMB,
                           createLeaf,
                           progressMonitor,
-                          settings);
+                          default_settings,
+                          type_settings);
 
 
           return builder(prims,pinfo);

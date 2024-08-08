@@ -23,8 +23,6 @@
 
 namespace embree
 {
-namespace isa
-{
   /*! Base class for set of acceleration structures. */
   class AccelSet : public Geometry
   {
@@ -124,20 +122,6 @@ namespace isa
 	bool ispc;
       };
 
-      struct Intersector1M
-      {
-        Intersector1M (ErrorFunc error = nullptr);
-        Intersector1M (IntersectFunc1M intersect, OccludedFunc1M occluded, const char* name);
-        
-        operator bool() const { return name; }
-        
-      public:
-        static const char* type;
-        IntersectFunc1M intersect;
-        OccludedFunc1M occluded;
-        const char* name;
-      };
-
       struct IntersectorN
       {
         IntersectorN (ErrorFunc error = nullptr) ;
@@ -155,13 +139,22 @@ namespace isa
     public:
       
       /*! construction */
-      AccelSet (Scene* parent, RTCGeometryFlags gflags, size_t items, size_t numTimeSteps);
+      AccelSet (Scene* scene, RTCGeometryFlags gflags, size_t items, size_t numTimeSteps);
       
       /*! makes the acceleration structure immutable */
       virtual void immutable () {}
       
       /*! build accel */
       virtual void build () = 0;
+
+      /*! check if the i'th primitive is valid between the specified time range */
+      __forceinline bool valid(size_t i, const range<size_t>& itime_range) const
+      {
+        for (size_t itime = itime_range.begin(); itime <= itime_range.end(); itime++)
+          if (!isvalid(bounds(i,itime))) return false;
+        
+        return true;
+      }
 
       /*! Calculates the bounds of an item */
       __forceinline BBox3fa bounds(size_t i, size_t itime = 0) const
@@ -190,13 +183,6 @@ namespace isa
         return LBBox3fa(box[0],box[1]);
       }
 
-      /*! calculates the linear bounds of the i'th item at the itimeGlobal'th time segment */
-      __forceinline LBBox3fa linearBounds(size_t i, size_t itimeGlobal, size_t numTimeStepsGlobal) const
-      {
-        return Geometry::linearBounds([&] (size_t itime) { return bounds(i, itime); },
-                                      itimeGlobal, numTimeStepsGlobal, numTimeSteps);
-      }
-
       /*! calculates the build bounds of the i'th item, if it's valid */
       __forceinline bool buildBounds(size_t i, BBox3fa* bbox = nullptr) const
       {
@@ -214,15 +200,20 @@ namespace isa
         return isvalid(bounds0) && isvalid(bounds1);
       }
 
-      /*! calculates the build bounds of the i'th item at the itimeGlobal'th time segment, if it's valid */
-      __forceinline bool buildBounds(size_t i, size_t itimeGlobal, size_t numTimeStepsGlobal, BBox3fa& bbox) const
-      {
-        return Geometry::buildBounds([&] (size_t itime, BBox3fa& bbox) -> bool
-                                     {
-                                       bbox = bounds(i, itime);
-                                       return isvalid(bbox);
-                                     },
-                                     itimeGlobal, numTimeStepsGlobal, numTimeSteps, bbox);
+      /*! calculates the linear bounds of the i'th primitive for the specified time range */
+      __forceinline LBBox3fa linearBounds(size_t primID, const BBox1f& time_range) const {
+        return LBBox3fa([&] (size_t itime) { return bounds(primID, itime); }, time_range, fnumTimeSegments);
+      }
+      
+      /*! calculates the linear bounds of the i'th primitive for the specified time range */
+      __forceinline bool linearBounds(size_t i, const BBox1f& time_range, LBBox3fa& bbox) const  {
+        if (!valid(i, getTimeSegmentRange(time_range, fnumTimeSegments))) return false;
+        bbox = linearBounds(i, time_range);
+        return true;
+      }
+
+      __forceinline Leaf::Type leafType() {
+        return Leaf::TY_OBJECT;
       }
       
       void enabling ();
@@ -236,10 +227,8 @@ namespace isa
         assert(item < size());
         if (likely(intersectors.intersector1.intersect)) { // old code for compatibility
           intersectors.intersector1.intersect(intersectors.ptr,(RTCRay&)ray,item);
-        } else if (likely(intersectors.intersector1M.intersect)) {
-          RTCRay* pray = (RTCRay*)&ray;
-          intersectors.intersector1M.intersect(intersectors.ptr,context->user,&pray,1,item);
-        } else {
+        } 
+        else {
           int mask = -1;
           assert(intersectors.intersectorN.intersect);
           intersectors.intersectorN.intersect((int*)&mask,intersectors.ptr,context->user,(RTCRayN*)&ray,1,item);
@@ -305,39 +294,14 @@ namespace isa
         }
       }
 #endif
-
-      /*! Intersects a stream of rays with the scene. */
-      __forceinline void intersect1M (Ray** rays, size_t N, size_t item, IntersectContext* context) 
-      {
-        assert(item < size());
-        if (intersectors.intersector1M.intersect) { // Intersect1N callback is optional
-          intersectors.intersector1M.intersect(intersectors.ptr,context->user,(RTCRay**)rays,N,item);
-        }
-        else if (N == 1) {
-          int mask = -1;
-          assert(intersectors.intersectorN.intersect);
-          intersectors.intersectorN.intersect((int*)&mask,intersectors.ptr,context->user,(RTCRayN*)rays[0],1,item);
-        } 
-        else 
-        {
-          int mask[MAX_INTERNAL_STREAM_SIZE];
-          StackRayPacket<MAX_INTERNAL_STREAM_SIZE> packet(N);
-          for (size_t i=0; i<N; i++) packet.writeRay(i,mask,*rays[i]);
-          assert(intersectors.intersectorN.intersect);
-          intersectors.intersectorN.intersect(mask,intersectors.ptr,context->user,(RTCRayN*)packet.data,N,item);
-          for (size_t i=0; i<N; i++) packet.readHit(i,*rays[i]);
-        }
-      }
       
       /*! Tests if single ray is occluded by the scene. */
       __forceinline void occluded (Ray& ray, size_t item, IntersectContext* context) 
       {
         if (likely(intersectors.intersector1.occluded)) { // old code for compatibility
           intersectors.intersector1.occluded(intersectors.ptr,(RTCRay&)ray,item);
-        } else if (likely(intersectors.intersector1M.occluded)) {
-          RTCRay* pray = (RTCRay*)&ray;
-          intersectors.intersector1M.occluded(intersectors.ptr,context->user,&pray,1,item);
-        } else {
+        } 
+        else {
           int mask = -1;
           assert(intersectors.intersectorN.occluded);          
           intersectors.intersectorN.occluded((int*)&mask,intersectors.ptr,context->user,(RTCRayN*)&ray,1,item);
@@ -405,27 +369,6 @@ namespace isa
       }
 #endif
 
-      /*! Tests if a stream of rays is occluded by the scene. */
-      __forceinline void occluded1M (Ray** rays, size_t N, size_t item, IntersectContext* context) 
-      {
-        if (likely(intersectors.intersector1M.occluded)) { // Occluded1N callback is optional
-          intersectors.intersector1M.occluded(intersectors.ptr,context->user,(RTCRay**)rays,N,item);
-        }
-        else if (N == 1) {
-          int mask = -1;
-          assert(intersectors.intersectorN.occluded);
-          intersectors.intersectorN.occluded((int*)&mask,intersectors.ptr,context->user,(RTCRayN*)rays[0],1,item);
-        } 
-        else 
-        {
-          int mask[MAX_INTERNAL_STREAM_SIZE];
-          StackRayPacket<MAX_INTERNAL_STREAM_SIZE> packet(N);
-          for (size_t i=0; i<N; i++) packet.writeRay(i,mask,*rays[i]);
-          assert(intersectors.intersectorN.occluded);
-          intersectors.intersectorN.occluded(mask,intersectors.ptr,context->user,(RTCRayN*)packet.data,N,item);
-          for (size_t i=0; i<N; i++) packet.readOcclusion(i,*rays[i]);
-        }
-      }
 
     public:
       RTCBoundsFunc  boundsFunc;
@@ -442,7 +385,6 @@ namespace isa
         Intersector4 intersector4;
         Intersector8 intersector8;
         Intersector16 intersector16;
-        Intersector1M intersector1M;
         IntersectorN intersectorN;
       } intersectors;
   };
@@ -478,18 +420,10 @@ namespace isa
                                    false);                              \
   }
   
-#define DEFINE_SET_INTERSECTOR1M(symbol,intersector)                    \
-  AccelSet::Intersector1M symbol() {                                    \
-    return AccelSet::Intersector1M((AccelSet::IntersectFunc1M)intersector::intersect, \
-                                   (AccelSet::OccludedFunc1M )intersector::occluded, \
-                                   TOSTRING(isa) "::" TOSTRING(symbol)); \
-  }
-  
 #define DEFINE_SET_INTERSECTORN(symbol,intersector)                     \
   AccelSet::IntersectorN symbol() {                                     \
     return AccelSet::IntersectorN((AccelSet::IntersectFuncN)intersector::intersect, \
                                   (AccelSet::OccludedFuncN)intersector::occluded, \
                                   TOSTRING(isa) "::" TOSTRING(symbol)); \
   }
-}
 }

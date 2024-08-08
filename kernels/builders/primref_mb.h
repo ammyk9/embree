@@ -1,26 +1,41 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
-#include "../common/default.h"
+#include "default.h"
+#include "primref.h"
 
-#define MBLUR_BIN_LBBOX 1
+#define MBLUR_BIN_LBBOX 0
 
 namespace embree
 {
 #if MBLUR_BIN_LBBOX
 
   /*! A primitive reference stores the bounds of the primitive and its ID. */
-  struct PrimRefMB
+  struct __aligned(32) PrimRefMB
   {
     typedef LBBox3fa BBox;
 
     __forceinline PrimRefMB () {}
 
-    __forceinline PrimRefMB (const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, BBox1f time_range, unsigned int totalTimeSegments, unsigned int geomID, unsigned int primID)
-      : lbounds((LBBox3fx)lbounds_i), time_range(time_range)
+    __forceinline PrimRefMB (const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, unsigned int totalTimeSegments, unsigned int geomID, unsigned int primID)
+      : lbounds(lbounds_i)
     {
+      if (totalTimeSegments == 0) activeTimeSegments = 1; // we count non-mblur geometry with weight 1
       assert(activeTimeSegments > 0);
       lbounds.bounds0.lower.a = geomID;
       lbounds.bounds0.upper.a = primID;
@@ -28,26 +43,22 @@ namespace embree
       lbounds.bounds1.upper.a = totalTimeSegments;
     }
 
-    __forceinline PrimRefMB (EmptyTy empty, const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, BBox1f time_range, unsigned int totalTimeSegments, size_t id)
-      : lbounds((LBBox3fx)lbounds_i), time_range(time_range)
+    __forceinline PrimRefMB (const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, unsigned int totalTimeSegments, Leaf::Type ty, unsigned int geomID, unsigned int primID)
+      : lbounds(lbounds_i)
     {
+      if (totalTimeSegments == 0) activeTimeSegments = 1; // we count non-mblur geometry with weight 1
       assert(activeTimeSegments > 0);
-#if defined(__64BIT__)
-      lbounds.bounds0.lower.a = id & 0xFFFFFFFF;
-      lbounds.bounds0.upper.a = (id >> 32) & 0xFFFFFFFF;
-#else
-      lbounds.bounds0.lower.a = id;
-      lbounds.bounds0.upper.a = 0;
-#endif
+      lbounds.bounds0.lower.a = Leaf::encode(ty,geomID);
+      lbounds.bounds0.upper.a = primID;
       lbounds.bounds1.lower.a = activeTimeSegments;
       lbounds.bounds1.upper.a = totalTimeSegments;
     }
-    
-    __forceinline PrimRefMB (const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, BBox1f time_range, unsigned int totalTimeSegments, size_t id)
-      : lbounds((LBBox3fx)lbounds_i), time_range(time_range)
+
+    __forceinline PrimRefMB (const LBBox3fa& lbounds_i, unsigned int activeTimeSegments, unsigned int totalTimeSegments, size_t id)
+      : lbounds(lbounds_i)
     {
       assert(activeTimeSegments > 0);
-#if defined(__64BIT__)
+#if defined(__X86_64__)
       lbounds.bounds0.lower.u = id & 0xFFFFFFFF;
       lbounds.bounds0.upper.u = (id >> 32) & 0xFFFFFFFF;
 #else
@@ -72,25 +83,6 @@ namespace embree
       return lbounds.bounds1.upper.a;
     }
 
-     /* calculate overlapping time segment range */
-    __forceinline range<int> timeSegmentRange(const BBox1f& range) const {
-      return getTimeSegmentRange(range,time_range,float(totalTimeSegments()));
-    }
-
-     /* returns time that corresponds to time step */
-    __forceinline float timeStep(const int i) const {
-      assert(i>=0 && i<=(int)totalTimeSegments());
-      return time_range.lower + time_range.size()*float(i)/float(totalTimeSegments());
-    }
-    
-    /*! checks if time range overlaps */
-    __forceinline bool time_range_overlap(const BBox1f& range) const
-    {
-      if (0.9999f*time_range.upper <= range.lower) return false;
-      if (1.0001f*time_range.lower >= range.upper) return false;
-      return true;
-    }
-
     /*! returns center for binning */
     __forceinline Vec3fa binCenter() const {
       return center2(lbounds.interpolate(0.5f));
@@ -103,9 +95,14 @@ namespace embree
       center_o = binCenter();
     }
 
+    /*! returns the type */
+    __forceinline Leaf::Type type() const { 
+      return Leaf::decodeTy(lbounds.bounds0.lower.a);
+    }
+
     /*! returns the geometry ID */
     __forceinline unsigned geomID() const {
-      return lbounds.bounds0.lower.a;
+      return Leaf::decodeID(lbounds.bounds0.lower.a);
     }
 
     /*! returns the primitive ID */
@@ -115,7 +112,7 @@ namespace embree
 
     /*! returns an size_t sized ID */
     __forceinline size_t ID() const {
-#if defined(__64BIT__)
+#if defined(__X86_64__)
       return size_t(lbounds.bounds0.lower.u) + (size_t(lbounds.bounds0.upper.u) << 32);
 #else
       return size_t(lbounds.bounds0.lower.u);
@@ -133,13 +130,12 @@ namespace embree
     }
 
     /*! Outputs primitive reference to a stream. */
-    friend __forceinline embree_ostream operator<<(embree_ostream cout, const PrimRefMB& ref) {
-      return cout << "{ time_range = " << ref.time_range << ", bounds = " << ref.bounds() << ", geomID = " << ref.geomID() << ", primID = " << ref.primID() << ", active_segments = " << ref.size() << ",  total_segments = " << ref.totalTimeSegments() << " }";
+    friend __forceinline std::ostream& operator<<(std::ostream& cout, const PrimRefMB& ref) {
+      return cout << "{ bounds = " << ref.bounds() << ", geomID = " << ref.geomID() << ", primID = " << ref.primID() << ", active_segments = " << ref.size() << ",  total_segments = " << ref.totalTimeSegments() << " }";
     }
 
   public:
-    LBBox3fx lbounds;
-    BBox1f time_range; // entire geometry time range
+    LBBox3fa lbounds;
   };
 
 #else
@@ -151,58 +147,56 @@ namespace embree
 
     __forceinline PrimRefMB () {}
 
-    __forceinline PrimRefMB (const LBBox3fa& bounds, unsigned int activeTimeSegments, BBox1f time_range, unsigned int totalTimeSegments, unsigned int geomID, unsigned int primID)
-      : bbox(bounds.interpolate(0.5f)), _activeTimeSegments(activeTimeSegments), _totalTimeSegments(totalTimeSegments), time_range(time_range)
+    __forceinline PrimRefMB (const LBBox3fa& bounds, unsigned int activeTimeSegments, unsigned int totalTimeSegments, unsigned int geomID, unsigned int primID)
+      : bbox(bounds.interpolate(0.5f))
     {
+      if (totalTimeSegments == 0) activeTimeSegments = 1; // we count non-mblur geometry with weight 1
       assert(activeTimeSegments > 0);
       bbox.lower.a = geomID;
       bbox.upper.a = primID;
+      num.x = activeTimeSegments;
+      num.y = totalTimeSegments;
     }
-    
-    __forceinline PrimRefMB (EmptyTy empty, const LBBox3fa& bounds, unsigned int activeTimeSegments, BBox1f time_range, unsigned int totalTimeSegments, size_t id)
-      : bbox(bounds.interpolate(0.5f)), _activeTimeSegments(activeTimeSegments), _totalTimeSegments(totalTimeSegments), time_range(time_range)
+
+    __forceinline PrimRefMB (const LBBox3fa& bounds, unsigned int activeTimeSegments, unsigned int totalTimeSegments, Leaf::Type ty, unsigned int geomID, unsigned int primID)
+      : bbox(bounds.interpolate(0.5f))
     {
+      if (totalTimeSegments == 0) activeTimeSegments = 1; // we count non-mblur geometry with weight 1
       assert(activeTimeSegments > 0);
-#if defined(__64BIT__)
+      bbox.lower.a = Leaf::encode(ty,geomID);
+      bbox.upper.a = primID;
+      num.x = activeTimeSegments;
+      num.y = totalTimeSegments;
+    }
+
+    __forceinline PrimRefMB (const LBBox3fa& bounds, unsigned int activeTimeSegments, unsigned int totalTimeSegments, size_t id)
+      : bbox(bounds.interpolate(0.5f))
+    {
+      if (totalTimeSegments == 0) activeTimeSegments = 1; // we count non-mblur geometry with weight 1
+      assert(activeTimeSegments > 0);
+#if defined(__X86_64__)
       bbox.lower.u = id & 0xFFFFFFFF;
       bbox.upper.u = (id >> 32) & 0xFFFFFFFF;
 #else
       bbox.lower.u = id;
       bbox.upper.u = 0;
 #endif
+      num.x = activeTimeSegments;
+      num.y = totalTimeSegments;
     }
-    
+
     /*! returns bounds for binning */
     __forceinline BBox3fa bounds() const {
       return bbox;
     }
 
     /*! returns the number of time segments of this primref */
-    __forceinline unsigned int size() const { 
-      return _activeTimeSegments;
+    __forceinline unsigned size() const { 
+      return num.x;
     }
 
-    __forceinline unsigned int totalTimeSegments() const { 
-      return _totalTimeSegments;
-    }
-
-     /* calculate overlapping time segment range */
-    __forceinline range<int> timeSegmentRange(const BBox1f& range) const {
-      return getTimeSegmentRange(range,time_range,float(_totalTimeSegments));
-    }
-
-     /* returns time that corresponds to time step */
-    __forceinline float timeStep(const int i) const {
-      assert(i>=0 && i<=(int)_totalTimeSegments);
-      return time_range.lower + time_range.size()*float(i)/float(_totalTimeSegments);
-    }
-    
-    /*! checks if time range overlaps */
-    __forceinline bool time_range_overlap(const BBox1f& range) const
-    {
-      if (0.9999f*time_range.upper <= range.lower) return false;
-      if (1.0001f*time_range.lower >= range.upper) return false;
-      return true;
+    __forceinline unsigned totalTimeSegments() const { 
+      return num.y;
     }
 
     /*! returns center for binning */
@@ -217,19 +211,24 @@ namespace embree
       center_o = center2(bounds());
     }
 
+    /*! returns the type */
+    __forceinline Leaf::Type type() const { 
+      return Leaf::decodeTy(bbox.lower.a);
+    }
+
     /*! returns the geometry ID */
-    __forceinline unsigned int geomID() const { 
-      return bbox.lower.a;
+    __forceinline unsigned geomID() const { 
+      return Leaf::decodeID(bbox.lower.a);
     }
 
     /*! returns the primitive ID */
-    __forceinline unsigned int primID() const { 
+    __forceinline unsigned primID() const { 
       return bbox.upper.a;
     }
 
     /*! returns an size_t sized ID */
     __forceinline size_t ID() const { 
-#if defined(__64BIT__)
+#if defined(__X86_64__)
       return size_t(bbox.lower.u) + (size_t(bbox.upper.u) << 32);
 #else
       return size_t(bbox.lower.u);
@@ -247,16 +246,29 @@ namespace embree
     }
 
     /*! Outputs primitive reference to a stream. */
-    friend __forceinline embree_ostream operator<<(embree_ostream cout, const PrimRefMB& ref) {
+    friend __forceinline std::ostream& operator<<(std::ostream& cout, const PrimRefMB& ref) {
       return cout << "{ bounds = " << ref.bounds() << ", geomID = " << ref.geomID() << ", primID = " << ref.primID() << ", active_segments = " << ref.size() << ",  total_segments = " << ref.totalTimeSegments() << " }";
     }
 
   public:
     BBox3fa bbox; // bounds, geomID, primID
-    unsigned int _activeTimeSegments;
-    unsigned int _totalTimeSegments;
-    BBox1f time_range; // entire geometry time range
+    Vec3ia num;   // activeTimeSegments, totalTimeSegments
   };
 
 #endif
+
+  namespace isa
+  {
+    inline void convert_PrimRefMBArray_To_PrimRefArray(PrimRefMB* in, PrimRef* out, size_t N) // FIXME: parallelize
+    {
+      for (size_t i=0; i<N; i++)
+        out[i] = PrimRef(in[i].bounds(),in[i].type(),in[i].geomID(),in[i].primID());
+    }      
+
+    inline void convert_PrimRefArray_To_PrimRefMBArray(PrimRef* in, PrimRefMB* out, size_t N) // FIXME: parallelize
+    {
+      for (ssize_t i=N-1; i>=0; i--)
+        out[i] = PrimRefMB(LBBox3fa(in[i].bounds()),0,0,in[i].type(),in[i].geomID(),in[i].primID());
+    }      
+  }     
 }

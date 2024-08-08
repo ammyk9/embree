@@ -29,6 +29,7 @@ namespace isa
     {
       Type ();
       size_t size(const char* This) const;
+      bool last(const char* This) const;
     };
     
     static const Type& type();
@@ -37,6 +38,7 @@ namespace isa
     {
       TypeCached ();
       size_t size(const char* This) const;
+      bool last(const char* This) const;
     };
     
     static const TypeCached& type_cached();
@@ -44,7 +46,8 @@ namespace isa
   public:
 
     /*! constructor for cached subdiv patch */
-    SubdivPatch1Cached (const unsigned int gID,
+    SubdivPatch1Cached (const Leaf::Type type,
+                        const unsigned int gID,
                         const unsigned int pID,
                         const unsigned int subPatch,
                         const SubdivMesh *const mesh,
@@ -53,7 +56,7 @@ namespace isa
                         const float edge_level[4],
                         const int subdiv[4],
                         const int simd_width) 
-      : SubdivPatch1Base(gID,pID,subPatch,mesh,time,uv,edge_level,subdiv,simd_width) {}
+      : SubdivPatch1Base(type,gID,pID,subPatch,mesh,time,uv,edge_level,subdiv,simd_width) {}
   };
 }
 }

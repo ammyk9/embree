@@ -1,5 +1,18 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
@@ -8,13 +21,11 @@
 
 namespace embree
 {
-namespace isa
-{
   /*! Triangle Mesh */
   struct TriangleMesh : public Geometry
   {
     /*! type of this geometry */
-    static const Geometry::GTypeMask geom_type = Geometry::MTY_TRIANGLE_MESH;
+    static const Geometry::Type geom_type = Geometry::TRIANGLE_MESH;
 
     /*! triangle indices */
     struct Triangle 
@@ -22,7 +33,7 @@ namespace isa
       uint32_t v[3];
 
       /*! outputs triangle indices */
-      __forceinline friend embree_ostream operator<<(embree_ostream cout, const Triangle& t) {
+      __forceinline friend std::ostream &operator<<(std::ostream& cout, const Triangle& t) {
         return cout << "Triangle { " << t.v[0] << ", " << t.v[1] << ", " << t.v[2] << " }";
       }
     };
@@ -30,77 +41,30 @@ namespace isa
   public:
 
     /*! triangle mesh construction */
-    TriangleMesh (Device* device); 
+    TriangleMesh (Scene* scene, RTCGeometryFlags flags, size_t numTriangles, size_t numVertices, size_t numTimeSteps); 
 
     /* geometry interface */
   public:
-    void setMask(unsigned mask);
-    void setNumTimeSteps (unsigned int numTimeSteps);
-    void setVertexAttributeCount (unsigned int N);
-    void setBuffer(RTCBufferType type, unsigned int slot, RTCFormat format, const Ref<Buffer>& buffer, size_t offset, size_t stride, unsigned int num);
-    void* getBuffer(RTCBufferType type, unsigned int slot);
-    void updateBuffer(RTCBufferType type, unsigned int slot);
-    void commit();
-    bool verify();
-    void interpolate(const RTCInterpolateArguments* const args);
-    void addElementsToCount (GeometryCounts & counts) const;
+    void enabling();
+    void disabling();
+    void setMask (unsigned mask);
+    void setBuffer(RTCBufferType type, void* ptr, size_t offset, size_t stride, size_t size);
+    void* map(RTCBufferType type);
+    void unmap(RTCBufferType type);
+    void preCommit();
+    void postCommit();
+    void immutable ();
+    bool verify ();
+    void interpolate(unsigned primID, float u, float v, RTCBufferType buffer, float* P, float* dPdu, float* dPdv, float* ddPdudu, float* ddPdvdv, float* ddPdudv, size_t numFloats);
+    // FIXME: implement interpolateN
 
-    template<int N>
-    void interpolate_impl(const RTCInterpolateArguments* const args)
-    {
-      unsigned int primID = args->primID;
-      float u = args->u;
-      float v = args->v;
-      RTCBufferType bufferType = args->bufferType;
-      unsigned int bufferSlot = args->bufferSlot;
-      float* P = args->P;
-      float* dPdu = args->dPdu;
-      float* dPdv = args->dPdv;
-      float* ddPdudu = args->ddPdudu;
-      float* ddPdvdv = args->ddPdvdv;
-      float* ddPdudv = args->ddPdudv;
-      unsigned int valueCount = args->valueCount;
-      
-      /* calculate base pointer and stride */
-      assert((bufferType == RTC_BUFFER_TYPE_VERTEX && bufferSlot < numTimeSteps) ||
-             (bufferType == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE && bufferSlot <= vertexAttribs.size()));
-      const char* src = nullptr; 
-      size_t stride = 0;
-      if (bufferType == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE) {
-        src    = vertexAttribs[bufferSlot].getPtr();
-        stride = vertexAttribs[bufferSlot].getStride();
-      } else {
-        src    = vertices[bufferSlot].getPtr();
-        stride = vertices[bufferSlot].getStride();
-      }
-      
-      for (unsigned int i=0; i<valueCount; i+=N)
-      {
-        size_t ofs = i*sizeof(float);
-        const float w = 1.0f-u-v;
-        const Triangle& tri = triangle(primID);
-        const vbool<N> valid = vint<N>((int)i)+vint<N>(step) < vint<N>(int(valueCount));
-        const vfloat<N> p0 = mem<vfloat<N>>::loadu(valid,(float*)&src[tri.v[0]*stride+ofs]);
-        const vfloat<N> p1 = mem<vfloat<N>>::loadu(valid,(float*)&src[tri.v[1]*stride+ofs]);
-        const vfloat<N> p2 = mem<vfloat<N>>::loadu(valid,(float*)&src[tri.v[2]*stride+ofs]);
-        
-        if (P) {
-          mem<vfloat<N>>::storeu(valid,P+i,madd(w,p0,madd(u,p1,v*p2)));
-        }
-        if (dPdu) {
-          assert(dPdu); mem<vfloat<N>>::storeu(valid,dPdu+i,p1-p0);
-          assert(dPdv); mem<vfloat<N>>::storeu(valid,dPdv+i,p2-p0);
-        }
-        if (ddPdudu) {
-          assert(ddPdudu); mem<vfloat<N>>::storeu(valid,ddPdudu+i,vfloat<N>(zero));
-          assert(ddPdvdv); mem<vfloat<N>>::storeu(valid,ddPdvdv+i,vfloat<N>(zero));
-          assert(ddPdudv); mem<vfloat<N>>::storeu(valid,ddPdudv+i,vfloat<N>(zero));
-        }
-      }
-    }
-    
   public:
-    
+
+    /*! returns number of triangles */
+    __forceinline size_t size() const {
+      return triangles.size();
+    }
+
     /*! returns number of vertices */
     __forceinline size_t numVertices() const {
       return vertices[0].size();
@@ -131,18 +95,6 @@ namespace isa
       return vertices[itime].getPtr(i);
     }
 
-    /*! returns i'th vertex of for specified time */
-    __forceinline Vec3fa vertex(size_t i, float time) const
-    {
-      float ftime;
-      const size_t itime = timeSegment(time, ftime);
-      const float t0 = 1.0f - ftime;
-      const float t1 = ftime;
-      Vec3fa v0 = vertex(i, itime+0);
-      Vec3fa v1 = vertex(i, itime+1);
-      return madd(Vec3fa(t0),v0,t1*v1);
-    }
-
     /*! calculates the bounds of the i'th triangle */
     __forceinline BBox3fa bounds(size_t i) const 
     {
@@ -163,8 +115,17 @@ namespace isa
       return BBox3fa(min(v0,v1,v2),max(v0,v1,v2));
     }
 
+    /*! calculates the interpolated bounds of the i'th triangle at the specified time */
+    __forceinline BBox3fa bounds(size_t i, float time) const
+    {
+      float ftime; size_t itime = getTimeSegment(time, fnumTimeSegments, ftime);
+      const BBox3fa b0 = bounds(i, itime+0);
+      const BBox3fa b1 = bounds(i, itime+1);
+      return lerp(b0, b1, ftime);
+    }
+
     /*! check if the i'th primitive is valid at the itime'th timestep */
-    __forceinline bool valid(size_t i, size_t itime) const {
+    __forceinline bool valid(size_t i, size_t itime = 0) const {
       return valid(i, make_range(itime, itime));
     }
 
@@ -236,119 +197,57 @@ namespace isa
     }
 
     /*! calculates the linear bounds of the i'th primitive for the specified time range */
-    __forceinline LBBox3fa linearBounds(size_t primID, const BBox1f& dt) const {
-      return LBBox3fa([&] (size_t itime) { return bounds(primID, itime); }, dt, time_range, fnumTimeSegments);
+    __forceinline LBBox3fa linearBounds(size_t primID, const BBox1f& time_range) const {
+      return LBBox3fa([&] (size_t itime) { return bounds(primID, itime); }, time_range, fnumTimeSegments);
     }
 
     /*! calculates the linear bounds of the i'th primitive for the specified time range */
-    __forceinline bool linearBounds(size_t i, const BBox1f& dt, LBBox3fa& bbox) const  {
-      if (!valid(i, timeSegmentRange(dt))) return false;
-      bbox = linearBounds(i, dt);
+    __forceinline bool linearBounds(size_t i, const BBox1f& time_range, LBBox3fa& bbox) const  {
+      if (!valid(i, getTimeSegmentRange(time_range, fnumTimeSegments))) return false;
+      bbox = linearBounds(i, time_range);
       return true;
     }
 
-    /*! get fast access to first vertex buffer */
-    __forceinline float * getCompactVertexArray () const {
-      return (float*) vertices0.getPtr();
+    /*! calculates the linear bounds of the i'th primitive for the specified time range */
+    __forceinline bool linearBoundsSafe(size_t i, const BBox1f& time_range, LBBox3fa& bbox) const  
+    {
+      if (numTimeSteps == 1)
+      {
+        if (!valid(i)) return false;
+        bbox = LBBox3fa(bounds(i));
+        return true;
+      } 
+      else
+      {
+        if (!valid(i, getTimeSegmentRange(time_range, fnumTimeSegments))) return false;
+        bbox = linearBounds(i, time_range);
+        return true;
+      }
     }
 
-    /* gets version info of topology */
-    unsigned int getTopologyVersion() const {
-      return triangles.modCounter;
-    }
-    
-    /* returns true if topology changed */
-    bool topologyChanged(unsigned int otherVersion) const {
-      return triangles.isModified(otherVersion); // || numPrimitivesChanged;
-    }
-
-    /* returns the projected area */
-    __forceinline float projectedPrimitiveArea(const size_t i) const {
-      const Triangle& tri = triangle(i);
-      const Vec3fa v0 = vertex(tri.v[0]);
-      const Vec3fa v1 = vertex(tri.v[1]);
-      const Vec3fa v2 = vertex(tri.v[2]);      
-      return areaProjectedTriangle(v0,v1,v2);
+    __forceinline Leaf::Type leafType() {
+      return numTimeSteps == 1 ? Leaf::TY_TRIANGLE : Leaf::TY_TRIANGLE_MB;
     }
 
   public:
-    BufferView<Triangle> triangles;      //!< array of triangles
-    BufferView<Vec3fa> vertices0;        //!< fast access to first vertex buffer
-    Device::vector<BufferView<Vec3fa>> vertices = device; //!< vertex array for each timestep
-    Device::vector<RawBufferView> vertexAttribs = device; //!< vertex attributes
+    APIBuffer<Triangle> triangles;                    //!< array of triangles
+    BufferRefT<Vec3fa> vertices0;                     //!< fast access to first vertex buffer
+    vector<APIBuffer<Vec3fa>> vertices;               //!< vertex array for each timestep
+    vector<APIBuffer<char>> userbuffers;         //!< user buffers
   };
 
   namespace isa
   {
     struct TriangleMeshISA : public TriangleMesh
     {
-      TriangleMeshISA (Device* device)
-        : TriangleMesh(device) {}
+      TriangleMeshISA (Scene* scene, RTCGeometryFlags flags, size_t numTriangles, size_t numVertices, size_t numTimeSteps)
+        : TriangleMesh(scene,flags,numTriangles,numVertices,numTimeSteps) {}
 
-      LBBox3fa vlinearBounds(size_t primID, const BBox1f& time_range) const {
-        return linearBounds(primID,time_range);
-      }
-
-      PrimInfo createPrimRefArray(PrimRef* prims, const range<size_t>& r, size_t k, unsigned int geomID) const
-      {
-        PrimInfo pinfo(empty);
-        for (size_t j=r.begin(); j<r.end(); j++)
-        {
-          BBox3fa bounds = empty;
-          if (!buildBounds(j,&bounds)) continue;
-          const PrimRef prim(bounds,geomID,unsigned(j));
-          pinfo.add_center2(prim);
-          prims[k++] = prim;
-        }
-        return pinfo;
-      }
-
-      PrimInfo createPrimRefArrayMB(mvector<PrimRef>& prims, size_t itime, const range<size_t>& r, size_t k, unsigned int geomID) const
-      {
-        PrimInfo pinfo(empty);
-        for (size_t j=r.begin(); j<r.end(); j++)
-        {
-          BBox3fa bounds = empty;
-          if (!buildBounds(j,itime,bounds)) continue;
-          const PrimRef prim(bounds,geomID,unsigned(j));
-          pinfo.add_center2(prim);
-          prims[k++] = prim;
-        }
-        return pinfo;
-      }
-
-      PrimInfo createPrimRefArrayMB(PrimRef* prims, const BBox1f& time_range, const range<size_t>& r, size_t k, unsigned int geomID) const
-      {
-        PrimInfo pinfo(empty);
-        const BBox1f t0t1 = BBox1f::intersect(getTimeRange(), time_range);
-        if (t0t1.empty()) return pinfo;
-        
-        for (size_t j = r.begin(); j < r.end(); j++) {
-          LBBox3fa lbounds = empty;
-          if (!linearBounds(j, t0t1, lbounds))
-            continue;
-          const PrimRef prim(lbounds.bounds(), geomID, unsigned(j));
-          pinfo.add_center2(prim);
-          prims[k++] = prim;
-        }
-        return pinfo;
-      }
-
-      PrimInfoMB createPrimRefMBArray(mvector<PrimRefMB>& prims, const BBox1f& t0t1, const range<size_t>& r, size_t k, unsigned int geomID) const
-      {
-        PrimInfoMB pinfo(empty);
-        for (size_t j=r.begin(); j<r.end(); j++)
-        {
-          if (!valid(j, timeSegmentRange(t0t1))) continue;
-          const PrimRefMB prim(linearBounds(j,t0t1),this->numTimeSegments(),this->time_range,this->numTimeSegments(),geomID,unsigned(j));
-          pinfo.add_primref(prim);
-          prims[k++] = prim;
-        }
-        return pinfo;
-      }
+      virtual LBBox3fa virtualLinearBounds(size_t primID, const BBox1f& time_range) const;
+      virtual PrimInfo createPrimRefArray(mvector<PrimRef>& prims, const range<size_t>& src, size_t dst);
+      virtual PrimInfoMB createPrimRefArrayMB(mvector<PrimRefMB>& prims, const BBox1f t0t1, const range<size_t>& src, size_t dst);
     };
   }
 
-  DECLARE_ISA_FUNCTION(TriangleMesh*, createTriangleMesh, Device*);
-}
+  DECLARE_ISA_FUNCTION(TriangleMesh*, createTriangleMesh, Scene* COMMA RTCGeometryFlags COMMA size_t COMMA size_t COMMA size_t);
 }

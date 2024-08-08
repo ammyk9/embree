@@ -21,15 +21,15 @@
 
 namespace embree
 {
-namespace isa
-{
   struct Bezier1i
   {
     struct Type : public PrimitiveType {
       Type ();
       size_t size(const char* This) const;
+      bool last(const char* This) const;
     };
-    static const Type& type();
+    static Type type;
+    static const Leaf::Type leaf_type = Leaf::TY_HAIR;
 
   public:
 
@@ -45,17 +45,20 @@ namespace isa
     __forceinline Bezier1i () {}
 
     /*! Construction from vertices and IDs. */
-    __forceinline Bezier1i (const unsigned vertexID, const unsigned geomID, const unsigned primID)
-      : vertexID(vertexID), geom(geomID), prim(primID) {}
+    __forceinline Bezier1i (const unsigned vertexID, const unsigned geomID, const unsigned primID, const Leaf::Type ty, const bool last)
+      : vertexID(vertexID), geom(Leaf::encode(ty,geomID,last)), prim(primID) {}
+
+     /*! checks if this is the last primitive */
+    __forceinline unsigned last() const { return Leaf::decodeLast(geom); }
 
     /*! returns geometry ID */
-    __forceinline unsigned geomID() const { return geom; }
+    __forceinline unsigned geomID() const { return Leaf::decodeID(geom); }
 
     /*! returns primitive ID */
     __forceinline unsigned primID() const { return prim; }
 
     /*! fill curve from curve list */
-    __forceinline void fill(const PrimRef* prims, size_t& i, size_t end, Scene* scene)
+    __forceinline void fill(const PrimRef* prims, size_t& i, size_t end, Scene* scene, bool last)
     {
       const PrimRef& prim = prims[i];
       i++;
@@ -63,24 +66,52 @@ namespace isa
       const unsigned primID = prim.primID();
       const NativeCurves* curves = scene->get<NativeCurves>(geomID);
       const unsigned vertexID = curves->curve(primID);
-      new (this) Bezier1i(vertexID,geomID,primID);
+      new (this) Bezier1i(vertexID,geomID,primID,Leaf::TY_HAIR,last);
     }
 
     /*! fill curve from curve list */
-    __forceinline void fill(const BezierPrim* prims, size_t& i, size_t end, Scene* scene)
+    __forceinline LBBox3fa fillMB(const PrimRefMB* prims, size_t& i, size_t end, Scene* scene, const BBox1f time_range, bool last)
     {
-      const BezierPrim& curve = prims[i]; i++;
-      const unsigned geomID = curve.geomID();
-      const unsigned primID = curve.primID();
+      const PrimRefMB& prim = prims[i];
+      i++;
+      const unsigned geomID = prim.geomID();
+      const unsigned primID = prim.primID();
       const NativeCurves* curves = scene->get<NativeCurves>(geomID);
       const unsigned vertexID = curves->curve(primID);
-      new (this) Bezier1i(vertexID,geomID,primID);
+      new (this) Bezier1i(vertexID,geomID,primID,Leaf::TY_HAIR_MB,last);
+      return curves->linearBounds(primID,time_range);
     }
 
   public:
     unsigned vertexID; //!< index of start vertex
+  private:
     unsigned geom;     //!< geometry ID
     unsigned prim;     //!< primitive ID
+
   };
-}
+
+  struct Bezier1iMB : public Bezier1i
+  {
+    static const Leaf::Type leaf_type = Leaf::TY_HAIR_MB;
+    
+    template<typename BVH>
+    __forceinline static typename BVH::NodeRef createLeaf(const FastAllocator::CachedAllocator& alloc, PrimRef* prims, const range<size_t>& range, BVH* bvh)
+    {
+      assert(false);
+      return BVH::emptyNode;
+    }
+
+    template<typename BVH>
+      __forceinline static const typename BVH::NodeRecordMB4D createLeafMB (const SetMB& set, const FastAllocator::CachedAllocator& alloc, BVH* bvh)
+    {
+      size_t items = Bezier1i::blocks(set.object_range.size());
+      size_t start = set.object_range.begin();
+      Bezier1i* accel = (Bezier1i*) alloc.malloc1(items*sizeof(Bezier1i),BVH::byteAlignment);
+      typename BVH::NodeRef node = bvh->encodeLeaf((char*)accel,Leaf::TY_HAIR_MB);
+      LBBox3fa allBounds = empty;
+      for (size_t i=0; i<items; i++)
+        allBounds.extend(accel[i].fillMB(set.prims->data(), start, set.object_range.end(), bvh->scene, set.time_range, i==(items-1)));
+      return typename BVH::NodeRecordMB4D(node,allBounds,set.time_range,0.0f,items);
+    }
+  };
 }

@@ -244,7 +244,7 @@ namespace embree
       }
       
       __forceinline unsigned int geomID() const  {
-        return _geomID;
+        return Leaf::decodeID(_geomID);
       } 
       
       __forceinline unsigned int primID() const  {
@@ -252,17 +252,17 @@ namespace embree
       } 
 
     public:
+      unsigned _geomID;
+      unsigned _primID;
       BVH4::NodeRef troot;
 #if !defined(__64BIT__)
       unsigned align1;
 #endif
+
       unsigned time_steps;
       unsigned width;
-
       unsigned height;
       unsigned dim_offset;
-      unsigned _geomID;
-      unsigned _primID;
 
       unsigned align2;
       unsigned gridOffset;

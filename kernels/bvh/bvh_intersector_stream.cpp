@@ -120,8 +120,12 @@ namespace embree
           m_trav_active = intersectAlignedNodePacket(packet, node, b, frusta.nf, m_trav_active);
         }
 
-        /*! this is a leaf node */
+        /*! check for empty leaf in case we accidentally hit one */
         assert(cur != BVH::emptyNode);
+        if (cur == BVH::emptyNode)
+          goto pop;
+        
+        /*! this is a leaf node */
         STAT3(normal.trav_leaves, 1, 1, 1);
         size_t num; Primitive* prim = (Primitive*)cur.leaf(num);
 
@@ -391,8 +395,12 @@ namespace embree
           m_trav_active = intersectAlignedNodePacket(packet, node, b, frusta.nf, m_trav_active);
         }
 
-        /*! this is a leaf node */
+        /*! check for empty leaf in case we accidentally hit one */
         assert(cur != BVH::emptyNode);
+        if (cur == BVH::emptyNode)
+          goto pop;
+        
+        /*! this is a leaf node */
         STAT3(normal.trav_leaves, 1, 1, 1);
         size_t num; Primitive* prim = (Primitive*)cur.leaf(num);
 

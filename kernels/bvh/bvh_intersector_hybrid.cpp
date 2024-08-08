@@ -107,8 +107,12 @@ namespace embree
           BVHNNodeTraverser1<N,Nx,types>::traverseClosestHit(cur,mask,tNear,stackPtr,stackEnd);
         }
 
-        /*! this is a leaf node */
+        /*! check for empty leaf in case we accidentally hit one */
         assert(cur != BVH::emptyNode);
+        if (cur == BVH::emptyNode)
+          goto pop;
+        
+        /*! this is a leaf node */
         STAT3(normal.trav_leaves, 1, 1, 1);
         size_t num; Primitive* prim = (Primitive*)cur.leaf(num);
 
@@ -345,8 +349,12 @@ namespace embree
             break;
           }
 
-          /* intersect leaf */
+          /*! check for empty leaf in case we accidentally hit one */
           assert(cur != BVH::emptyNode);
+          if (cur == BVH::emptyNode)
+            goto pop;
+          
+          /* intersect leaf */
           const vbool<K> valid_leaf = ray_tfar > curDist;
           STAT3(normal.trav_leaves,1,popcnt(valid_leaf),K);
           if (unlikely(none(valid_leaf))) continue;
@@ -500,9 +508,13 @@ namespace embree
             }
           }
 
+          /*! check for empty leaf in case we accidentally hit one */
+          assert(cur != BVH::emptyNode);
+          if (cur == BVH::emptyNode)
+            goto pop;
+          
           /* intersect leaf */
           assert(cur != BVH::invalidNode);
-          assert(cur != BVH::emptyNode);
           const vbool<K> valid_leaf = ray_tfar > curDist;
           STAT3(normal.trav_leaves,1,popcnt(valid_leaf),K);
           if (unlikely(none(valid_leaf))) continue;
@@ -577,8 +589,12 @@ namespace embree
             BVHNNodeTraverser1<N,Nx,types>::traverseAnyHit(cur,mask,tNear,stackPtr,stackEnd);
           }
 
-	  /*! this is a leaf node */
+          /*! check for empty leaf in case we accidentally hit one */
           assert(cur != BVH::emptyNode);
+          if (cur == BVH::emptyNode)
+            goto pop;
+
+	  /*! this is a leaf node */
 	  STAT3(shadow.trav_leaves,1,1,1);
 	  size_t num; Primitive* prim = (Primitive*) cur.leaf(num);
 
@@ -903,9 +919,12 @@ namespace embree
           break;
         }
 
+        /*! check for empty leaf in case we accidentally hit one */
+        assert(cur != BVH::emptyNode);
+        if (cur == BVH::emptyNode)
+          goto pop;
 
         /* intersect leaf */
-        assert(cur != BVH::emptyNode);
         const vbool<K> valid_leaf = ray_tfar > curDist;
         STAT3(shadow.trav_leaves,1,popcnt(valid_leaf),K);
         if (unlikely(none(valid_leaf))) continue;
@@ -1039,9 +1058,13 @@ namespace embree
             if (unlikely(cur == BVH::emptyNode)) goto pop;
           }
 
+          /*! check for empty leaf in case we accidentally hit one */
+          assert(cur != BVH::emptyNode);
+          if (cur == BVH::emptyNode)
+            goto pop;
+        
           /* intersect leaf */
           assert(cur != BVH::invalidNode);
-          assert(cur != BVH::emptyNode);
 #if defined(__AVX__)
           STAT3(normal.trav_leaves,1,__popcnt(m_active),K);
 #endif

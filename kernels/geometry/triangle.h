@@ -1,13 +1,24 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
 #include "primitive.h"
 
 namespace embree
-{
-namespace isa
 {
   /* Precalculated representation for M triangles. Stores for each
      triangle a base vertex, two edges, and the geometry normal to
@@ -18,16 +29,16 @@ namespace isa
   public:
     struct Type : public PrimitiveType 
     {
-      const char* name() const;
-      size_t sizeActive(const char* This) const;
-      size_t sizeTotal(const char* This) const;
-      size_t getBytes(const char* This) const;
+      Type();
+      size_t size(const char* This) const;
+      bool last(const char* This) const;
     };
-    static const Type& type();
+    static Type type;
+    static const Leaf::Type leaf_type = Leaf::TY_TRIANGLE;
     
   public:
 
-    /* Returns maximum number of stored triangles */
+    /* Returns maximal number of stored triangles */
     static __forceinline size_t max_size() { return M; }
     
     /* Returns required number of primitive blocks for N primitives */
@@ -39,27 +50,35 @@ namespace isa
     __forceinline TriangleM() {}
 
     /* Construction from vertices and IDs */
-    __forceinline TriangleM(const Vec3vf<M>& v0, const Vec3vf<M>& v1, const Vec3vf<M>& v2, const vuint<M>& geomIDs, const vuint<M>& primIDs)
-      : v0(v0), e1(v0-v1), e2(v2-v0), geomIDs(geomIDs), primIDs(primIDs) {}
+    __forceinline TriangleM(const Vec3vf<M>& v0, const Vec3vf<M>& v1, const Vec3vf<M>& v2, const vint<M>& geomIDs, const vint<M>& primIDs, const bool last)
+      : v0(v0), e1(v0-v1), e2(v2-v0), geomIDs(Leaf::vencode(Leaf::TY_TRIANGLE,geomIDs,last)), primIDs(primIDs) {}
 
     /* Returns a mask that tells which triangles are valid */
-    __forceinline vbool<M> valid() const { return geomIDs != vuint<M>(-1); }
+    __forceinline vbool<M> valid() const { return geomIDs != vint<M>(-1); }
 
     /* Returns true if the specified triangle is valid */
     __forceinline bool valid(const size_t i) const { assert(i<M); return geomIDs[i] != -1; }
     
     /* Returns the number of stored triangles */
-    __forceinline size_t size() const { return bsf(~movemask(valid()));  }
+    __forceinline size_t size() const { return __bsf(~movemask(valid()));  }
+
+    /*! checks if this is the last primitive */
+    __forceinline unsigned last() const { return Leaf::decodeLast(geomIDs[0]); }
 
     /* Returns the geometry IDs */
-    __forceinline       vuint<M>& geomID()       { return geomIDs;  }
-    __forceinline const vuint<M>& geomID() const { return geomIDs;  }
-    __forceinline unsigned int geomID(const size_t i) const { assert(i<M); return geomIDs[i]; }
+    __forceinline       vint<M>& geomID()       { return geomIDs;  }
+    __forceinline const vint<M>& geomID() const { return geomIDs;  }
+    __forceinline unsigned geomID(const size_t i) const { assert(i<M); return Leaf::decodeID(geomIDs[i]); }
 
     /* Returns the primitive IDs */
-    __forceinline       vuint<M>& primID()       { return primIDs; }
-    __forceinline const vuint<M>& primID() const { return primIDs; }
-    __forceinline unsigned int primID(const size_t i) const { assert(i<M); return primIDs[i]; }
+    __forceinline       vint<M>& primID()       { return primIDs; }
+    __forceinline const vint<M>& primID() const { return primIDs; }
+    __forceinline unsigned primID(const size_t i) const { assert(i<M); return primIDs[i]; }
+
+    /* returns area of triangles */
+    __forceinline float area() {
+      return reduce_add(0.5f*length(cross(e2,e1)));
+    }
 
     /* Calculate the bounds of the triangle */
     __forceinline BBox3fa bounds() const 
@@ -92,16 +111,18 @@ namespace isa
       vfloat<M>::store_nt(&dst->e2.x,src.e2.x);
       vfloat<M>::store_nt(&dst->e2.y,src.e2.y);
       vfloat<M>::store_nt(&dst->e2.z,src.e2.z);
-      vuint<M>::store_nt(&dst->geomIDs,src.geomIDs);
-      vuint<M>::store_nt(&dst->primIDs,src.primIDs);
+      vint<M>::store_nt(&dst->geomIDs,src.geomIDs);
+      vint<M>::store_nt(&dst->primIDs,src.primIDs);
     }
 
     /* Fill triangle from triangle list */
-    __forceinline void fill(const PrimRef* prims, size_t& begin, size_t end, Scene* scene)
+    template<typename PrimRef>
+    __forceinline BBox3fa fill(const PrimRef* prims, size_t& begin, size_t end, Scene* scene, bool last)
     {
-      vuint<M> vgeomID = -1, vprimID = -1;
+      vint<M> vgeomID = -1, vprimID = -1;
       Vec3vf<M> v0 = zero, v1 = zero, v2 = zero;
       
+      BBox3fa bounds = empty;
       for (size_t i=0; i<M && begin<end; i++, begin++)
       {
 	const PrimRef& prim = prims[begin];
@@ -112,26 +133,59 @@ namespace isa
         const Vec3fa& p0 = mesh->vertex(tri.v[0]);
         const Vec3fa& p1 = mesh->vertex(tri.v[1]);
         const Vec3fa& p2 = mesh->vertex(tri.v[2]);
+        bounds.extend(p0);
+        bounds.extend(p1);
+        bounds.extend(p2);
         vgeomID [i] = geomID;
         vprimID [i] = primID;
         v0.x[i] = p0.x; v0.y[i] = p0.y; v0.z[i] = p0.z;
         v1.x[i] = p1.x; v1.y[i] = p1.y; v1.z[i] = p1.z;
         v2.x[i] = p2.x; v2.y[i] = p2.y; v2.z[i] = p2.z;
       }
-      TriangleM::store_nt(this,TriangleM(v0,v1,v2,vgeomID,vprimID));
+      TriangleM::store_nt(this,TriangleM(v0,v1,v2,vgeomID,vprimID,last));
+      return bounds;
     }
 
+    template<typename BVH>
+    __forceinline static typename BVH::NodeRef createLeaf(const FastAllocator::CachedAllocator& alloc, PrimRef* prims, const range<size_t>& range, BVH* bvh)
+    {
+      size_t cur = range.begin();
+      size_t items = blocks(range.size());
+      TriangleM* accel = (TriangleM*) alloc.malloc1(items*sizeof(TriangleM),BVH::byteAlignment);
+      for (size_t i=0; i<items; i++) {
+        accel[i].fill(prims,cur,range.end(),bvh->scene,i==(items-1));
+      }
+      return BVH::encodeLeaf((char*)accel,Leaf::TY_TRIANGLE);
+    }
+
+    template<typename BVH>
+    __forceinline static const typename BVH::NodeRecordMB4D createLeafMB (const SetMB& set, const FastAllocator::CachedAllocator& alloc, BVH* bvh)
+    {
+      size_t items = blocks(set.object_range.size());
+      size_t start = set.object_range.begin();
+      TriangleM* accel = (TriangleM*) alloc.malloc1(items*sizeof(TriangleM),BVH::byteAlignment);
+      typename BVH::NodeRef node = bvh->encodeLeaf((char*)accel,Leaf::TY_TRIANGLE);
+      LBBox3fa allBounds = empty;
+      float A = 0.0f;
+      for (size_t i=0; i<items; i++) {
+        const BBox3fa b = accel[i].fill(set.prims->data(),start,set.object_range.end(),bvh->scene,i==(items-1));
+        allBounds.extend(LBBox3fa(b));
+        A += accel[i].area();
+      }
+      return typename BVH::NodeRecordMB4D(node,allBounds,set.time_range,A,1.0f*items);
+    }
+      
     /* Updates the primitive */
     __forceinline BBox3fa update(TriangleMesh* mesh)
     {
       BBox3fa bounds = empty;
-      vuint<M> vgeomID = -1, vprimID = -1;
+      vint<M> vgeomID = -1, vprimID = -1;
       Vec3vf<M> v0 = zero, v1 = zero, v2 = zero;
 
-	  for (size_t i=0; i<M; i++)
+      for (size_t i=0; i<M; i++)
       {
-        if (unlikely(geomID(i) == -1)) break;
-        const unsigned geomId = geomID(i);
+        if (unlikely(!valid(i))) break;
+        const unsigned geomId = geomIDs[i]; // copies last bit
         const unsigned primId = primID(i);
         const TriangleMesh::Triangle& tri = mesh->triangle(primId);
         const Vec3fa p0 = mesh->vertex(tri.v[0]);
@@ -144,7 +198,7 @@ namespace isa
         v1.x[i] = p1.x; v1.y[i] = p1.y; v1.z[i] = p1.z;
         v2.x[i] = p2.x; v2.y[i] = p2.y; v2.z[i] = p2.z;
       }
-      TriangleM::store_nt(this,TriangleM(v0,v1,v2,vgeomID,vprimID));
+      TriangleM::store_nt(this,TriangleM(v0,v1,v2,vgeomID,vprimID,false));
       return bounds;
     }
 
@@ -152,14 +206,12 @@ namespace isa
     Vec3vf<M> v0;      // base vertex of the triangles
     Vec3vf<M> e1;      // 1st edge of the triangles (v0-v1)
     Vec3vf<M> e2;      // 2nd edge of the triangles (v2-v0)
-  private:
-    vuint<M> geomIDs; // geometry IDs
-    vuint<M> primIDs; // primitive IDs
+    vint<M> geomIDs; // geometry IDs
+    vint<M> primIDs; // primitive IDs
   };
 
-  //template<int M>
-  //typename TriangleM<M>::Type TriangleM<M>::type;
+  template<int M>
+  typename TriangleM<M>::Type TriangleM<M>::type;
 
   typedef TriangleM<4> Triangle4;
-}
 }

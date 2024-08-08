@@ -39,7 +39,8 @@ namespace isa
     /*! Default constructor. */
     __forceinline SubdivPatch1Base () {}
 
-    SubdivPatch1Base (const unsigned int gID,
+    SubdivPatch1Base (const Leaf::Type type,
+                      const unsigned int gID,
                       const unsigned int pID,
                       const unsigned int subPatch,
                       const SubdivMesh *const mesh,
@@ -82,14 +83,21 @@ namespace isa
       return (SharedLazyTessellationCache::CacheEntry&) root_ref;
     }
 
-  public:    
+    __forceinline Leaf::Type ltype() const  {
+      return Leaf::decodeTy(geom);
+    } 
+
     __forceinline unsigned int geomID() const  {
-      return geom;
+      return Leaf::decodeID(geom);
     } 
 
     __forceinline unsigned int primID() const  {
       return prim;
     } 
+
+  private:    
+    unsigned int geom;                          //!< geometry ID of the subdivision mesh this patch belongs to
+    unsigned int prim;                          //!< primitive ID of this subdivision patch
 
   public:
     SharedLazyTessellationCache::Tag root_ref;
@@ -102,8 +110,6 @@ namespace isa
     unsigned char flags;
     unsigned char type;
     unsigned short grid_u_res;
-    unsigned int geom;                          //!< geometry ID of the subdivision mesh this patch belongs to
-    unsigned int prim;                          //!< primitive ID of this subdivision patch
     unsigned short grid_v_res;
 
     unsigned short grid_size_simd_blocks;
