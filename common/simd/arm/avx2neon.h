@@ -1,13 +1,11 @@
 #pragma once
 
-#if !defined(__aarch64__)
-#error "avx2neon is only supported for AARCH64"
-#endif
-
 #include "sse2neon.h"
 
 #define AVX2NEON_ABI static inline  __attribute__((always_inline))
 
+
+struct __m256d;
 
 struct __m256 {
     __m128 lo,hi;
@@ -23,7 +21,7 @@ struct __m256i {
     operator __m256() const {__m256 res; res.lo = __m128(lo);res.hi = __m128(hi); return res;}
     __m256i() {}
 };
-
+ 
 
 
 
@@ -52,12 +50,38 @@ struct __m256d {
 
 
 AVX2NEON_ABI
+__m128 _mm_blend_ps (__m128 a, __m128 b, const int imm8)
+{
+    __m128 res;
+    for (int i=0;i<4;i++)
+    {
+        if (imm8 & (1<<i))
+        {
+            res[i] = b[i];
+        }
+        else{
+            res[i] = a[i];
+        }
+    }
+    
+    return res;
+}
+
+AVX2NEON_ABI
 __m128i _mm_blend_epi32 (__m128i a, __m128i b, const int imm8)
 {
-    __m128 af = _mm_castsi128_ps(a);
-    __m128 bf = _mm_castsi128_ps(b);
-    __m128 blendf = _mm_blend_ps(af, bf, imm8);
-    return _mm_castps_si128(blendf);
+    __m128i res;
+    for (int i=0;i<4;i++)
+    {
+        if (imm8 & (1<<i))
+        {
+            res[i] = b[i];
+        }
+        else{
+            res[i] = a[i];
+        }
+    }
+    return res;
 }
 
 AVX2NEON_ABI
@@ -69,39 +93,54 @@ int _mm_movemask_popcnt(__m128 a)
 AVX2NEON_ABI
 __m128 _mm_maskload_ps (float const * mem_addr, __m128i mask)
 {
-    float32x4_t res;
-    uint32x4_t mask_u32 = vreinterpretq_u32_m128i(mask);
+    __m128 res;
     for (int i=0;i<4;i++) {
-        if (mask_u32[i] & 0x80000000) res[i] = mem_addr[i]; else res[i] = 0;
+        if (mask[i] & 0x80000000) res[i] = mem_addr[i]; else res[i] = 0;
     }
-    return vreinterpretq_m128_f32(res);
+    return res;
 }
 
 AVX2NEON_ABI
 void _mm_maskstore_ps (float * mem_addr, __m128i mask, __m128 a)
 {
-    float32x4_t a_f32 = vreinterpretq_f32_m128(a);
-    uint32x4_t mask_u32 = vreinterpretq_u32_m128i(mask);
     for (int i=0;i<4;i++) {
-        if (mask_u32[i] & 0x80000000) mem_addr[i] = a_f32[i];
+        if (mask[i] & 0x80000000) mem_addr[i] = a[i];
     }
 }
 
 AVX2NEON_ABI
 void _mm_maskstore_epi32 (int * mem_addr, __m128i mask, __m128i a)
 {
-    uint32x4_t mask_u32 = vreinterpretq_u32_m128i(mask);
-    int32x4_t a_s32 = vreinterpretq_s32_m128i(a);
     for (int i=0;i<4;i++) {
-        if (mask_u32[i] & 0x80000000) mem_addr[i] = a_s32[i];
+        if (mask[i] & 0x80000000) mem_addr[i] = a[i];
     }
 }
 
 
-#define _mm_fmadd_ss _mm_fmadd_ps
-#define _mm_fmsub_ss _mm_fmsub_ps
 #define _mm_fnmsub_ss _mm_fnmsub_ps
+
 #define _mm_fnmadd_ss _mm_fnmadd_ps
+
+
+AVX2NEON_ABI
+__m128 _mm_broadcast_ss (float const * mem_addr)
+{
+    return vdupq_n_f32(*mem_addr);
+}
+
+AVX2NEON_ABI __m128 _mm_madd_ps(__m128 a, __m128 b, __m128 c)
+{
+    return vmlaq_f32(c, a, b);
+}
+
+
+
+
+#define _mm_fmsub_ss _mm_fmsub_ps
+#define _mm_fmadd_ps _mm_madd_ps
+#define _mm_fmadd_ss _mm_madd_ps
+
+
 
 template<int code>
 AVX2NEON_ABI float32x4_t dpps_neon(const float32x4_t& a,const float32x4_t& b)
@@ -145,13 +184,12 @@ inline float32x4_t dpps_neon<0xff>(const float32x4_t& a,const float32x4_t& b)
 AVX2NEON_ABI
 __m128 _mm_permutevar_ps (__m128 a, __m128i b)
 {
-    uint32x4_t b_u32 = vreinterpretq_u32_m128i(b);
-    float32x4_t x;
+    __m128 x;
     for (int i=0;i<4;i++)
     {
-        x[i] = a[b_u32[i]];
+        x[i] = a[b[i&3]];
     }
-    return vreinterpretq_m128_f32(x);
+    return x;
 }
 
 AVX2NEON_ABI
@@ -182,12 +220,12 @@ __m256 _mm256_undefined_ps()
     return _mm256_setzero_ps();
 }
 
-CAST_SIMD_TYPE(__m256d, _mm256_castps_pd,    __m256,  float64x2_t)
-CAST_SIMD_TYPE(__m256i, _mm256_castps_si256, __m256,  __m128i)
-CAST_SIMD_TYPE(__m256,  _mm256_castsi256_ps, __m256i, __m128)
-CAST_SIMD_TYPE(__m256,  _mm256_castpd_ps ,   __m256d, __m128)
-CAST_SIMD_TYPE(__m256d, _mm256_castsi256_pd, __m256i, float64x2_t)
-CAST_SIMD_TYPE(__m256i, _mm256_castpd_si256, __m256d, __m128i)
+CAST_SIMD_TYPE(__m256d,_mm256_castps_pd,__m256,float64x2_t)
+CAST_SIMD_TYPE(__m256i,_mm256_castps_si256,__m256,__m128i)
+CAST_SIMD_TYPE(__m256, _mm256_castsi256_ps, __m256i,__m128)
+CAST_SIMD_TYPE(__m256, _mm256_castpd_ps ,__m256d,__m128)
+CAST_SIMD_TYPE(__m256d, _mm256_castsi256_pd, __m256i,float64x2_t)
+CAST_SIMD_TYPE(__m256i, _mm256_castpd_si256, __m256d,__m128i)
 
 
 
@@ -235,11 +273,11 @@ __m256 _mm256_broadcast_ss (float const * mem_addr)
 AVX2NEON_ABI
 __m256i _mm256_set_epi32 (int e7, int e6, int e5, int e4, int e3, int e2, int e1, int e0)
 {
+    __m128i lo = {e0,e1,e2,e3}, hi = {e4,e5,e6,e7};
     __m256i res;
-    res.lo = _mm_set_epi32(e3,e2,e1,e0);
-    res.hi = _mm_set_epi32(e7,e6,e5,e4);
+    res.lo = lo; res.hi = hi;
     return res;
-
+ 
 }
 
 AVX2NEON_ABI
@@ -247,20 +285,6 @@ __m256i _mm256_set1_epi32 (int a)
 {
     __m256i res;
     res.lo = res.hi = vdupq_n_s32(a);
-    return res;
-}
-AVX2NEON_ABI
-__m256i _mm256_set1_epi8 (int a)
-{
-    __m256i res;
-    res.lo = res.hi = vdupq_n_s8(a);
-    return res;
-}
-AVX2NEON_ABI
-__m256i _mm256_set1_epi16 (int a)
-{
-    __m256i res;
-    res.lo = res.hi = vdupq_n_s16(a);
     return res;
 }
 
@@ -298,46 +322,7 @@ __m256 __mm256_shuffle_ps (const __m256 a,const __m256& b)
 
 }
 
-template<int imm8>
-AVX2NEON_ABI
-__m256i __mm256_shuffle_epi32 (const __m256i a)
-{
-    __m256i res;
-    res.lo = _mm_shuffle_epi32(a.lo,imm8);
-    res.hi = _mm_shuffle_epi32(a.hi,imm8);
-    return res;
-
-}
-
-template<int imm8>
-AVX2NEON_ABI
-__m256i __mm256_srli_si256 (__m256i a)
-{
-    __m256i res;
-    res.lo = _mm_srli_si128(a.lo,imm8);
-    res.hi = _mm_srli_si128(a.hi,imm8);
-    return res;
-}
-
-template<int imm8>
-AVX2NEON_ABI
-__m256i __mm256_slli_si256 (__m256i a)
-{
-    __m256i res;
-    res.lo = _mm_slli_si128(a.lo,imm8);
-    res.hi = _mm_slli_si128(a.hi,imm8);
-    return res;
-}
-
-
-#define _mm256_srli_si256(a,b) __mm256_srli_si256<b>(a)
-#define _mm256_slli_si256(a,b) __mm256_slli_si256<b>(a)
-
-
-
 #define _mm256_shuffle_ps(a,b,c) __mm256_shuffle_ps<c>(a,b)
-#define _mm256_shuffle_epi32(a,c) __mm256_shuffle_epi32<c>(a)
-
 
 AVX2NEON_ABI
 __m256i _mm256_set1_epi64x (long long a)
@@ -364,11 +349,11 @@ __m256 _mm256_permute2f128_ps (__m256 a, __m256 b, int imm8)
     if (imm8 & 0x8)
         tmp = _mm_setzero_ps();
 
-
-
+    
+    
     res.lo = tmp;
     imm8 >>= 4;
-
+    
     switch (imm8 & 0x7)
     {
         case 0: tmp = a.lo; break;
@@ -378,9 +363,9 @@ __m256 _mm256_permute2f128_ps (__m256 a, __m256 b, int imm8)
     }
     if (imm8 & 0x8)
         tmp = _mm_setzero_ps();
-
+    
     res.hi = tmp;
-
+    
     return res;
 }
 
@@ -388,17 +373,22 @@ AVX2NEON_ABI
 __m256 _mm256_moveldup_ps (__m256 a)
 {
     __m256 res;
-    res.lo = _mm_moveldup_ps(a.lo);
-    res.hi = _mm_moveldup_ps(a.hi);
+    res.lo[0] = res.lo[1] = a.lo[0];
+    res.lo[2] = res.lo[3] = a.lo[2];
+    res.hi[0] = res.hi[1] = a.hi[0];
+    res.hi[2] = res.hi[3] = a.hi[2];
     return res;
+
 }
 
 AVX2NEON_ABI
 __m256 _mm256_movehdup_ps (__m256 a)
 {
     __m256 res;
-    res.lo = _mm_movehdup_ps(a.lo);
-    res.hi = _mm_movehdup_ps(a.hi);
+    res.lo[0] = res.lo[1] = a.lo[1];
+    res.lo[2] = res.lo[3] = a.lo[3];
+    res.hi[0] = res.hi[1] = a.hi[1];
+    res.hi[2] = res.hi[3] = a.hi[3];
     return res;
 }
 
@@ -424,8 +414,8 @@ AVX2NEON_ABI
 __m256d _mm256_movedup_pd (__m256d a)
 {
     __m256d res;
-    res.lo = _mm_movedup_pd(a.lo);
-    res.hi = _mm_movedup_pd(a.hi);
+    res.hi = a.hi;
+    res.lo[0] = res.lo[1] = a.lo[0];
     return res;
 }
 
@@ -443,30 +433,14 @@ UNARY_AVX_OP(__m256,_mm256_rsqrt_ps,_mm_rsqrt_ps)
 UNARY_AVX_OP(__m256,_mm256_rcp_ps,_mm_rcp_ps)
 UNARY_AVX_OP(__m256,_mm256_floor_ps,vrndmq_f32)
 UNARY_AVX_OP(__m256,_mm256_ceil_ps,vrndpq_f32)
-UNARY_AVX_OP(__m256i,_mm256_abs_epi16,_mm_abs_epi16)
 
 
-BINARY_AVX_OP(__m256i,_mm256_add_epi8,_mm_add_epi8)
-BINARY_AVX_OP(__m256i,_mm256_adds_epi8,_mm_adds_epi8)
-
-BINARY_AVX_OP(__m256i,_mm256_hadd_epi32,_mm_hadd_epi32)
 BINARY_AVX_OP(__m256i,_mm256_add_epi32,_mm_add_epi32)
 BINARY_AVX_OP(__m256i,_mm256_sub_epi32,_mm_sub_epi32)
 BINARY_AVX_OP(__m256i,_mm256_mullo_epi32,_mm_mullo_epi32)
 
 BINARY_AVX_OP(__m256i,_mm256_min_epi32,_mm_min_epi32)
 BINARY_AVX_OP(__m256i,_mm256_max_epi32,_mm_max_epi32)
-BINARY_AVX_OP(__m256i,_mm256_min_epi16,_mm_min_epi16)
-BINARY_AVX_OP(__m256i,_mm256_max_epi16,_mm_max_epi16)
-BINARY_AVX_OP(__m256i,_mm256_min_epi8,_mm_min_epi8)
-BINARY_AVX_OP(__m256i,_mm256_max_epi8,_mm_max_epi8)
-BINARY_AVX_OP(__m256i,_mm256_min_epu16,_mm_min_epu16)
-BINARY_AVX_OP(__m256i,_mm256_max_epu16,_mm_max_epu16)
-BINARY_AVX_OP(__m256i,_mm256_min_epu8,_mm_min_epu8)
-BINARY_AVX_OP(__m256i,_mm256_max_epu8,_mm_max_epu8)
-BINARY_AVX_OP(__m256i,_mm256_sign_epi16,_mm_sign_epi16)
-
-
 BINARY_AVX_OP_CAST(__m256i,_mm256_min_epu32,vminq_u32,__m128i,uint32x4_t)
 BINARY_AVX_OP_CAST(__m256i,_mm256_max_epu32,vmaxq_u32,__m128i,uint32x4_t)
 
@@ -490,7 +464,6 @@ BINARY_AVX_OP_CAST(__m256d,_mm256_xor_pd,veorq_s64,float64x2_t,int64x2_t)
 
 
 BINARY_AVX_OP(__m256i,_mm256_and_si256,_mm_and_si128)
-BINARY_AVX_OP(__m256i,_mm256_andnot_si256,_mm_andnot_si128)
 BINARY_AVX_OP(__m256i,_mm256_or_si256,_mm_or_si128)
 BINARY_AVX_OP(__m256i,_mm256_xor_si256,_mm_xor_si128)
 
@@ -498,7 +471,6 @@ BINARY_AVX_OP(__m256i,_mm256_xor_si256,_mm_xor_si128)
 BINARY_AVX_OP(__m256,_mm256_unpackhi_ps,_mm_unpackhi_ps)
 BINARY_AVX_OP(__m256,_mm256_unpacklo_ps,_mm_unpacklo_ps)
 TERNARY_AVX_OP(__m256,_mm256_blendv_ps,_mm_blendv_ps)
-TERNARY_AVX_OP(__m256i,_mm256_blendv_epi8,_mm_blendv_epi8)
 
 
 TERNARY_AVX_OP(__m256,_mm256_fmadd_ps,_mm_fmadd_ps)
@@ -507,57 +479,12 @@ TERNARY_AVX_OP(__m256,_mm256_fmsub_ps,_mm_fmsub_ps)
 TERNARY_AVX_OP(__m256,_mm256_fnmsub_ps,_mm_fnmsub_ps)
 
 
-
-BINARY_AVX_OP(__m256i,_mm256_packs_epi32,_mm_packs_epi32)
-BINARY_AVX_OP(__m256i,_mm256_packs_epi16,_mm_packs_epi16)
-BINARY_AVX_OP(__m256i,_mm256_packus_epi32,_mm_packus_epi32)
-BINARY_AVX_OP(__m256i,_mm256_packus_epi16,_mm_packus_epi16)
-
-
-BINARY_AVX_OP(__m256i,_mm256_unpackhi_epi64,_mm_unpackhi_epi64)
 BINARY_AVX_OP(__m256i,_mm256_unpackhi_epi32,_mm_unpackhi_epi32)
-BINARY_AVX_OP(__m256i,_mm256_unpackhi_epi16,_mm_unpackhi_epi16)
-BINARY_AVX_OP(__m256i,_mm256_unpackhi_epi8,_mm_unpackhi_epi8)
-
-BINARY_AVX_OP(__m256i,_mm256_unpacklo_epi64,_mm_unpacklo_epi64)
 BINARY_AVX_OP(__m256i,_mm256_unpacklo_epi32,_mm_unpacklo_epi32)
-BINARY_AVX_OP(__m256i,_mm256_unpacklo_epi16,_mm_unpacklo_epi16)
-BINARY_AVX_OP(__m256i,_mm256_unpacklo_epi8,_mm_unpacklo_epi8)
-
-BINARY_AVX_OP(__m256i,_mm256_mulhrs_epi16,_mm_mulhrs_epi16)
-BINARY_AVX_OP(__m256i,_mm256_mulhi_epu16,_mm_mulhi_epu16)
-BINARY_AVX_OP(__m256i,_mm256_mulhi_epi16,_mm_mulhi_epi16)
-//BINARY_AVX_OP(__m256i,_mm256_mullo_epu16,_mm_mullo_epu16)
-BINARY_AVX_OP(__m256i,_mm256_mullo_epi16,_mm_mullo_epi16)
-
-BINARY_AVX_OP(__m256i,_mm256_subs_epu16,_mm_subs_epu16)
-BINARY_AVX_OP(__m256i,_mm256_adds_epu16,_mm_adds_epu16)
-BINARY_AVX_OP(__m256i,_mm256_subs_epi16,_mm_subs_epi16)
-BINARY_AVX_OP(__m256i,_mm256_adds_epi16,_mm_adds_epi16)
-BINARY_AVX_OP(__m256i,_mm256_sub_epi16,_mm_sub_epi16)
-BINARY_AVX_OP(__m256i,_mm256_add_epi16,_mm_add_epi16)
-BINARY_AVX_OP(__m256i,_mm256_sub_epi8,_mm_sub_epi8)
-
-
-BINARY_AVX_OP(__m256i,_mm256_hadd_epi16,_mm_hadd_epi16)
-BINARY_AVX_OP(__m256i,_mm256_hadds_epi16,_mm_hadds_epi16)
-
-
 
 
 BINARY_AVX_OP(__m256i,_mm256_cmpeq_epi32,_mm_cmpeq_epi32)
 BINARY_AVX_OP(__m256i,_mm256_cmpgt_epi32,_mm_cmpgt_epi32)
-
-BINARY_AVX_OP(__m256i,_mm256_cmpeq_epi8,_mm_cmpeq_epi8)
-BINARY_AVX_OP(__m256i,_mm256_cmpgt_epi8,_mm_cmpgt_epi8)
-
-BINARY_AVX_OP(__m256i,_mm256_cmpeq_epi16,_mm_cmpeq_epi16)
-BINARY_AVX_OP(__m256i,_mm256_cmpgt_epi16,_mm_cmpgt_epi16)
-
-
-BINARY_AVX_OP(__m256i,_mm256_shuffle_epi8,_mm_shuffle_epi8)
-
-
 BINARY_AVX_OP(__m256,_mm256_cmpeq_ps,_mm_cmpeq_ps)
 BINARY_AVX_OP(__m256,_mm256_cmpneq_ps,_mm_cmpneq_ps)
 BINARY_AVX_OP(__m256,_mm256_cmpnlt_ps,_mm_cmpnlt_ps)
@@ -577,7 +504,7 @@ __m256i _mm256_cvtps_epi32 (__m256 a)
     res.lo = _mm_cvtps_epi32(a.lo);
     res.hi = _mm_cvtps_epi32(a.hi);
     return res;
-
+    
 }
 
 AVX2NEON_ABI
@@ -587,7 +514,7 @@ __m256i _mm256_cvttps_epi32 (__m256 a)
     res.lo = _mm_cvttps_epi32(a.lo);
     res.hi = _mm_cvttps_epi32(a.hi);
     return res;
-
+    
 }
 
 AVX2NEON_ABI
@@ -608,8 +535,8 @@ int _mm256_testz_ps (const __m256& a, const __m256& b)
     if (&a != &b)
         t = _mm256_and_ps(a,b);
 
-    int32x4_t l  = vshrq_n_s32(vreinterpretq_s32_m128(t.lo),31);
-    int32x4_t h  = vshrq_n_s32(vreinterpretq_s32_m128(t.hi),31);
+    __m128i l  = vshrq_n_s32(__m128i(t.lo),31);
+    __m128i h  = vshrq_n_s32(__m128i(t.hi),31);
     return vaddvq_s32(vaddq_s32(l,h)) == 0;
 }
 
@@ -624,78 +551,6 @@ __m256i _mm256_set_epi64x (int64_t e3, int64_t e2, int64_t e1, int64_t e0)
     res.hi = __m128i(t1);
     return res;
 }
-AVX2NEON_ABI
-__m256i _mm256_setr_epi64x (int64_t e0, int64_t e1, int64_t e2, int64_t e3)
-{
-    __m256i res;
-    int64x2_t t0 = {e0,e1};
-    int64x2_t t1 = {e2,e3};
-    res.lo = __m128i(t0);
-    res.hi = __m128i(t1);
-    return res;
-}
-
-
-
-AVX2NEON_ABI
-__m256i _mm256_set_epi8 (char e31, char e30, char e29, char e28, char e27, char e26, char e25, char e24, char e23, char e22, char e21, char e20, char e19, char e18, char e17, char e16, char e15, char e14, char e13, char e12, char e11, char e10, char e9, char e8, char e7, char e6, char e5, char e4, char e3, char e2, char e1, char e0)
-{
-    int8x16_t lo = {e0,e1,e2,e3,e4,e5,e6,e7,e8,e9,e10,e11,e12,e13,e14,e15};
-    int8x16_t hi = {e16,e17,e18,e19,e20,e21,e22,e23,e24,e25,e26,e27,e28,e29,e30,e31};
-    __m256i res;
-    res.lo = lo; res.hi = hi;
-    return res;
-}
-
-AVX2NEON_ABI
-__m256i _mm256_setr_epi8 (char e0, char e1, char e2, char e3, char e4, char e5, char e6, char e7, char e8, char e9, char e10, char e11, char e12, char e13, char e14, char e15, char e16, char e17, char e18, char e19, char e20, char e21, char e22, char e23, char e24, char e25, char e26, char e27, char e28, char e29, char e30, char e31)
-{
-    int8x16_t lo = {e0,e1,e2,e3,e4,e5,e6,e7,e8,e9,e10,e11,e12,e13,e14,e15};
-    int8x16_t hi = {e16,e17,e18,e19,e20,e21,e22,e23,e24,e25,e26,e27,e28,e29,e30,e31};
-    __m256i res;
-    res.lo = lo; res.hi = hi;
-    return res;
-}
-
-
-AVX2NEON_ABI
-__m256i _mm256_set_epi16 (short e15, short e14, short e13, short e12, short e11, short e10, short e9, short e8, short e7, short e6, short e5, short e4, short e3, short e2, short e1, short e0)
-{
-    int16x8_t lo = {e0,e1,e2,e3,e4,e5,e6,e7};
-    int16x8_t hi = {e8,e9,e10,e11,e12,e13,e14,e15};
-    __m256i res;
-    res.lo = lo; res.hi = hi;
-    return res;
-}
-
-AVX2NEON_ABI
-__m256i _mm256_setr_epi16 (short e0, short e1, short e2, short e3, short e4, short e5, short e6, short e7, short e8, short e9, short e10, short e11, short e12, short e13, short e14, short e15)
-{
-    int16x8_t lo = {e0,e1,e2,e3,e4,e5,e6,e7};
-    int16x8_t hi = {e8,e9,e10,e11,e12,e13,e14,e15};
-    __m256i res;
-    res.lo = lo; res.hi = hi;
-    return res;
-}
-
-
-
-
-AVX2NEON_ABI
-int _mm256_movemask_epi8(const __m256i& a)
-{
-    return (_mm_movemask_epi8(a.hi) << 16) | _mm_movemask_epi8(a.lo);
-}
-
-
-AVX2NEON_ABI
-int _mm256_testz_si256(const __m256i& a,const __m256i& b)
-{
-    uint32x4_t lo = vandq_u32(a.lo,b.lo);
-    uint32x4_t hi = vandq_u32(a.hi,b.hi);
-
-    return (vaddvq_u32(lo) + vaddvq_u32(hi)) == 0;
-}
 
 AVX2NEON_ABI
 __m256d _mm256_setzero_pd ()
@@ -708,24 +563,32 @@ __m256d _mm256_setzero_pd ()
 AVX2NEON_ABI
 int _mm256_movemask_pd (__m256d a)
 {
-    return (_mm_movemask_pd(a.hi) << 2) | _mm_movemask_pd(a.lo);
+    int res = 0;
+    uint64x2_t x;
+    x = uint64x2_t(a.lo);
+    res |= (x[0] >> 63) ? 1 : 0;
+    res |= (x[0] >> 63) ? 2 : 0;
+    x = uint64x2_t(a.hi);
+    res |= (x[0] >> 63) ? 4 : 0;
+    res |= (x[0] >> 63) ? 8 : 0;
+    return res;
 }
 
 AVX2NEON_ABI
 __m256i _mm256_cmpeq_epi64 (__m256i a, __m256i b)
 {
     __m256i res;
-    res.lo = _mm_cmpeq_epi64(a.lo, b.lo);
-    res.hi = _mm_cmpeq_epi64(a.hi, b.hi);
+    res.lo = __m128i(vceqq_s64(int64x2_t(a.lo),int64x2_t(b.lo)));
+    res.hi = __m128i(vceqq_s64(int64x2_t(a.hi),int64x2_t(b.hi)));
     return res;
 }
 
 AVX2NEON_ABI
-__m256d _mm256_cmpeq_pd (__m256d a, __m256d b)
+__m256i _mm256_cmpeq_pd (__m256d a, __m256d b)
 {
-    __m256d res;
-    res.lo = _mm_cmpeq_pd(a.lo, b.lo);
-    res.hi = _mm_cmpeq_pd(a.hi, b.hi);
+    __m256i res;
+    res.lo = __m128i(vceqq_f64(a.lo,b.lo));
+    res.hi = __m128i(vceqq_f64(a.hi,b.hi));
     return res;
 }
 
@@ -745,18 +608,21 @@ AVX2NEON_ABI
 __m256d _mm256_blendv_pd (__m256d a, __m256d b, __m256d mask)
 {
     __m256d res;
-    res.lo = _mm_blendv_pd(a.lo, b.lo, mask.lo);
-    res.hi = _mm_blendv_pd(a.hi, b.hi, mask.hi);
+    uint64x2_t t = uint64x2_t(mask.lo);
+    res.lo[0] = (t[0] >> 63) ? b.lo[0] : a.lo[0];
+    res.lo[1] = (t[1] >> 63) ? b.lo[1] : a.lo[1];
+    t = uint64x2_t(mask.hi);
+    res.hi[0] = (t[0] >> 63) ? b.hi[0] : a.hi[0];
+    res.hi[1] = (t[1] >> 63) ? b.hi[1] : a.hi[1];
     return res;
 }
 
 template<int imm8>
-AVX2NEON_ABI
 __m256 __mm256_dp_ps (__m256 a, __m256 b)
 {
     __m256 res;
-    res.lo = _mm_dp_ps(a.lo, b.lo, imm8);
-    res.hi = _mm_dp_ps(a.hi, b.hi, imm8);
+    res.lo = _mm_dp_ps(a.lo,b.lo,imm8);
+    res.hi = _mm_dp_ps(a.hi,b.hi,imm8);
     return res;
 }
 
@@ -767,13 +633,13 @@ double _mm256_permute4x64_pd_select(__m256d a, const int imm8)
 {
     switch (imm8 & 3) {
         case 0:
-            return ((float64x2_t)a.lo)[0];
+            return a.lo[0];
         case 1:
-            return ((float64x2_t)a.lo)[1];
+            return a.lo[1];
         case 2:
-            return ((float64x2_t)a.hi)[0];
+            return a.hi[0];
         case 3:
-            return ((float64x2_t)a.hi)[1];
+            return a.hi[1];
     }
     __builtin_unreachable();
     return 0;
@@ -782,14 +648,12 @@ double _mm256_permute4x64_pd_select(__m256d a, const int imm8)
 AVX2NEON_ABI
 __m256d _mm256_permute4x64_pd (__m256d a, const int imm8)
 {
-    float64x2_t lo,hi;
-    lo[0] = _mm256_permute4x64_pd_select(a,imm8 >> 0);
-    lo[1] = _mm256_permute4x64_pd_select(a,imm8 >> 2);
-    hi[0] = _mm256_permute4x64_pd_select(a,imm8 >> 4);
-    hi[1] = _mm256_permute4x64_pd_select(a,imm8 >> 6);
-
     __m256d res;
-    res.lo = lo; res.hi = hi;
+    res.lo[0] = _mm256_permute4x64_pd_select(a,imm8 >> 0);
+    res.lo[1] = _mm256_permute4x64_pd_select(a,imm8 >> 2);
+    res.hi[0] = _mm256_permute4x64_pd_select(a,imm8 >> 4);
+    res.hi[1] = _mm256_permute4x64_pd_select(a,imm8 >> 6);
+    
     return res;
 }
 
@@ -816,6 +680,7 @@ void _mm256_storeu_ps (float * mem_addr, __m256 a)
 {
     *(__m128 *)(mem_addr + 0) = a.lo;
     *(__m128 *)(mem_addr + 4) = a.hi;
+
 }
 
 #define _mm256_store_ps _mm256_storeu_ps
@@ -825,60 +690,12 @@ void _mm256_storeu_ps (float * mem_addr, __m256 a)
 AVX2NEON_ABI
 void _mm256_storeu_si256 (__m256i * mem_addr, __m256i a)
 {
-    *(__m128i *)((int32_t *)mem_addr + 0) = a.lo;
-    *(__m128i *)((int32_t *)mem_addr + 4) = a.hi;
+    *(__m128i *)((int *)mem_addr + 0) = a.lo;
+    *(__m128i *)((int *)mem_addr + 4) = a.hi;
+
 }
 
 #define _mm256_store_si256 _mm256_storeu_si256
-
-
-
-AVX2NEON_ABI
-__m256i _mm256_permute4x64_epi64 (const __m256i a, const int imm8)
-{
-    uint8x16x2_t tbl = {a.lo, a.hi};
-
-    uint8_t sz = sizeof(uint64_t);
-    uint8_t u64[4] = {
-        (uint8_t)(((imm8 >> 0) & 0x3) * sz),
-        (uint8_t)(((imm8 >> 2) & 0x3) * sz),
-        (uint8_t)(((imm8 >> 4) & 0x3) * sz),
-        (uint8_t)(((imm8 >> 6) & 0x3) * sz),
-    };
-
-    uint8x16_t idx_lo = {
-        // lo[0] bytes
-        (uint8_t)(u64[0]+0), (uint8_t)(u64[0]+1), (uint8_t)(u64[0]+2), (uint8_t)(u64[0]+3),
-        (uint8_t)(u64[0]+4), (uint8_t)(u64[0]+5), (uint8_t)(u64[0]+6), (uint8_t)(u64[0]+7),
-
-        // lo[1] bytes
-        (uint8_t)(u64[1]+0), (uint8_t)(u64[1]+1), (uint8_t)(u64[1]+2), (uint8_t)(u64[1]+3),
-        (uint8_t)(u64[1]+4), (uint8_t)(u64[1]+5), (uint8_t)(u64[1]+6), (uint8_t)(u64[1]+7),
-    };
-    uint8x16_t idx_hi = {
-        // hi[0] bytes
-        (uint8_t)(u64[2]+0), (uint8_t)(u64[2]+1), (uint8_t)(u64[2]+2), (uint8_t)(u64[2]+3),
-        (uint8_t)(u64[2]+4), (uint8_t)(u64[2]+5), (uint8_t)(u64[2]+6), (uint8_t)(u64[2]+7),
-
-        // hi[1] bytes
-        (uint8_t)(u64[3]+0), (uint8_t)(u64[3]+1), (uint8_t)(u64[3]+2), (uint8_t)(u64[3]+3),
-        (uint8_t)(u64[3]+4), (uint8_t)(u64[3]+5), (uint8_t)(u64[3]+6), (uint8_t)(u64[3]+7),
-    };
-
-    uint8x16_t lo = vqtbl2q_u8(tbl, idx_lo);
-    uint8x16_t hi = vqtbl2q_u8(tbl, idx_hi);
-
-    __m256i res;
-    res.lo = lo; res.hi = hi;
-    return res;
-}
-
-
-AVX2NEON_ABI
-__m256i _mm256_permute2x128_si256(const __m256i a,const __m256i b, const int imm8)
-{
-    return __m256i(_mm256_permute2f128_ps(__m256(a),__m256(b),imm8));
-}
 
 
 
@@ -889,19 +706,20 @@ __m256 _mm256_maskload_ps (float const * mem_addr, __m256i mask)
     res.lo = _mm_maskload_ps(mem_addr,mask.lo);
     res.hi = _mm_maskload_ps(mem_addr + 4,mask.hi);
     return res;
+
 }
 
 
 AVX2NEON_ABI
 __m256i _mm256_cvtepu8_epi32 (__m128i a)
 {
-    uint8x16_t a_u8 = vreinterpretq_u8_m128i(a);     // xxxx xxxx xxxx xxxx HHGG FFEE DDCC BBAA
-    uint16x8_t u16x8 = vmovl_u8(vget_low_u8(a_u8));  // 00HH 00GG 00FF 00EE 00DD 00CC 00BB 00AA
-    uint32x4_t lo = vmovl_u16(vget_low_u16(u16x8));  // 0000 00DD 0000 00CC 0000 00BB 0000 00AA
-    uint32x4_t hi = vmovl_high_u16(u16x8);           // 0000 00HH 0000 00GG 0000 00FF 0000 00EE
-
     __m256i res;
-    res.lo = lo; res.hi = hi;
+    uint8x16_t x = uint8x16_t(a);
+    for (int i=0;i<4;i++)
+    {
+        res.lo[i] = x[i];
+        res.hi[i] = x[i+4];
+    }
     return res;
 }
 
@@ -909,26 +727,40 @@ __m256i _mm256_cvtepu8_epi32 (__m128i a)
 AVX2NEON_ABI
 __m256i _mm256_cvtepi8_epi32 (__m128i a)
 {
-    int8x16_t a_s8 = vreinterpretq_s8_m128i(a);     // xxxx xxxx xxxx xxxx HHGG FFEE DDCC BBAA
-    int16x8_t s16x8 = vmovl_s8(vget_low_s8(a_s8));  // ssHH ssGG ssFF ssEE ssDD ssCC ssBB ssAA
-    int32x4_t lo = vmovl_s16(vget_low_s16(s16x8));  // ssss ssDD ssss ssCC ssss ssBB ssss ssAA
-    int32x4_t hi = vmovl_high_s16(s16x8);           // ssss ssHH ssss ssGG ssss ssFF ssss ssEE
-
     __m256i res;
-    res.lo = lo; res.hi = hi;
+    int8x16_t x = int8x16_t(a);
+    for (int i=0;i<4;i++)
+    {
+        res.lo[i] = x[i];
+        res.hi[i] = x[i+4];
+    }
     return res;
 }
 
 
 AVX2NEON_ABI
+__m256i _mm256_cvtepu16_epi32 (__m128i a)
+{
+    __m256i res;
+    uint16x8_t x = uint16x8_t(a);
+    for (int i=0;i<4;i++)
+    {
+        res.lo[i] = x[i];
+        res.hi[i] = x[i+4];
+    }
+    return res;
+}
+
+AVX2NEON_ABI
 __m256i _mm256_cvtepi16_epi32 (__m128i a)
 {
-    int16x8_t a_s16 = vreinterpretq_s16_m128i(a);   // HHHH GGGG FFFF EEEE DDDD CCCC BBBB AAAA
-    int32x4_t lo = vmovl_s16(vget_low_s16(a_s16));  // ssss DDDD ssss CCCC ssss BBBB ssss AAAA
-    int32x4_t hi = vmovl_high_s16(a_s16);           // ssss HHHH ssss GGGG ssss FFFF ssss EEEE
-
     __m256i res;
-    res.lo = lo; res.hi = hi;
+    int16x8_t x = int16x8_t(a);
+    for (int i=0;i<4;i++)
+    {
+        res.lo[i] = x[i];
+        res.hi[i] = x[i+4];
+    }
     return res;
 }
 
@@ -942,30 +774,11 @@ void _mm256_maskstore_epi32 (int* mem_addr, __m256i mask, __m256i a)
 }
 
 AVX2NEON_ABI
-__m256i _mm256_slli_epi64 (__m256i a, int imm8)
-{
-    __m256i res;
-    res.lo = _mm_slli_epi64(a.lo,imm8);
-    res.hi = _mm_slli_epi64(a.hi,imm8);
-    return res;
-}
-
-AVX2NEON_ABI
 __m256i _mm256_slli_epi32 (__m256i a, int imm8)
 {
     __m256i res;
     res.lo = _mm_slli_epi32(a.lo,imm8);
     res.hi = _mm_slli_epi32(a.hi,imm8);
-    return res;
-}
-
-
-AVX2NEON_ABI
-__m256i __mm256_slli_epi16 (__m256i a, int imm8)
-{
-    __m256i res;
-    res.lo = _mm_slli_epi16(a.lo,imm8);
-    res.hi = _mm_slli_epi16(a.hi,imm8);
     return res;
 }
 
@@ -980,48 +793,11 @@ __m256i _mm256_srli_epi32 (__m256i a, int imm8)
 }
 
 AVX2NEON_ABI
-__m256i __mm256_srli_epi16 (__m256i a, int imm8)
-{
-    __m256i res;
-    res.lo = _mm_srli_epi16(a.lo,imm8);
-    res.hi = _mm_srli_epi16(a.hi,imm8);
-    return res;
-}
-
-AVX2NEON_ABI
-__m256i _mm256_cvtepu16_epi32(__m128i a)
-{
-    __m256i res;
-    res.lo = vmovl_u16(vget_low_u16(a));
-    res.hi = vmovl_high_u16(a);
-    return res;
-}
-
-AVX2NEON_ABI
-__m256i _mm256_cvtepu8_epi16(__m128i a)
-{
-    __m256i res;
-    res.lo = vmovl_u8(vget_low_u8(a));
-    res.hi = vmovl_high_u8(a);
-    return res;
-}
-
-
-AVX2NEON_ABI
 __m256i _mm256_srai_epi32 (__m256i a, int imm8)
 {
     __m256i res;
     res.lo = _mm_srai_epi32(a.lo,imm8);
     res.hi = _mm_srai_epi32(a.hi,imm8);
-    return res;
-}
-
-AVX2NEON_ABI
-__m256i _mm256_srai_epi16 (__m256i a, int imm8)
-{
-    __m256i res;
-    res.lo = _mm_srai_epi16(a.lo,imm8);
-    res.hi = _mm_srai_epi16(a.hi,imm8);
     return res;
 }
 
@@ -1108,14 +884,9 @@ __m256 _mm256_cvtepi32_ps (__m256i a)
 AVX2NEON_ABI
 void _mm256_maskstore_ps (float * mem_addr, __m256i mask, __m256 a)
 {
-    uint32x4_t mask_lo = mask.lo;
-    uint32x4_t mask_hi = mask.hi;
-    float32x4_t a_lo = a.lo;
-    float32x4_t a_hi = a.hi;
-
     for (int i=0;i<4;i++) {
-        if (mask_lo[i] & 0x80000000) mem_addr[i] = a_lo[i];
-        if (mask_hi[i] & 0x80000000) mem_addr[i+4] = a_hi[i];
+        if (mask.lo[i] & 0x80000000) mem_addr[i] = a.lo[i];
+        if (mask.hi[i] & 0x80000000) mem_addr[i+4] = a.hi[i];
     }
 }
 
@@ -1142,35 +913,22 @@ __m256 _mm256_blend_ps (__m256 a, __m256 b, const int imm8)
 AVX2NEON_ABI
 __m256i _mm256_blend_epi32 (__m256i a, __m256i b, const int imm8)
 {
-    return __m256i(_mm256_blend_ps(__m256(a),__m256(b),imm8));
-
-}
-
-AVX2NEON_ABI
-__m256i _mm256_blend_epi16 (__m256i a, __m256i b, const int imm8)
-{
     __m256i res;
-    res.lo = _mm_blend_epi16(a.lo,b.lo,imm8);
-    res.hi = _mm_blend_epi16(a.hi,b.hi,imm8);
+    res.lo = _mm_blend_epi32(a.lo,b.lo,imm8 & 0xf);
+    res.hi = _mm_blend_epi32(a.hi,b.hi,imm8 >> 4);
     return res;
+
 }
-
-
 
 AVX2NEON_ABI
 __m256i _mm256_i32gather_epi32 (int const* base_addr, __m256i vindex, const int scale)
 {
-    int32x4_t vindex_lo = vindex.lo;
-    int32x4_t vindex_hi = vindex.hi;
-    int32x4_t lo,hi;
+    __m256i res;
     for (int i=0;i<4;i++)
     {
-        lo[i] = *(int32_t *)((char *) base_addr + (vindex_lo[i]*scale));
-        hi[i] = *(int32_t *)((char *) base_addr + (vindex_hi[i]*scale));
+        res.lo[i] = *(int *)((char *) base_addr + (vindex.lo[i]*scale));
+        res.hi[i] = *(int *)((char *) base_addr + (vindex.hi[i]*scale));
     }
-
-    __m256i res;
-    res.lo = lo; res.hi = hi;
     return res;
 }
 
@@ -1178,19 +936,15 @@ __m256i _mm256_i32gather_epi32 (int const* base_addr, __m256i vindex, const int 
 AVX2NEON_ABI
 __m256i _mm256_mask_i32gather_epi32 (__m256i src, int const* base_addr, __m256i vindex, __m256i mask, const int scale)
 {
-    uint32x4_t mask_lo = mask.lo;
-    uint32x4_t mask_hi = mask.hi;
-    int32x4_t vindex_lo = vindex.lo;
-    int32x4_t vindex_hi = vindex.hi;
-    int32x4_t lo,hi;
-    lo = hi = _mm_setzero_si128();
+    __m256i res = _mm256_setzero_si256();
     for (int i=0;i<4;i++)
     {
-        if (mask_lo[i] >> 31) lo[i] = *(int32_t *)((char *) base_addr + (vindex_lo[i]*scale));
-        if (mask_hi[i] >> 31) hi[i] = *(int32_t *)((char *) base_addr + (vindex_hi[i]*scale));
+        if (mask.lo[i] >> 31) res.lo[i] = *(int *)((char *) base_addr + (vindex.lo[i]*scale));
+        if (mask.hi[i] >> 31) res.hi[i] = *(int *)((char *) base_addr + (vindex.hi[i]*scale));
     }
-
-    __m256i res;
-    res.lo = lo; res.hi = hi;
+    
     return res;
+
 }
+
+

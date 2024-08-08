@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../math/emath.h"
+#include "../math/math.h"
 
 #define vboolf vboolf_impl
 #define vboold vboold_impl
@@ -95,14 +95,7 @@ namespace embree
     static __forceinline void storeu(const vboolf4& mask, void* ptr, const vuint4& i) { storeu(ptr,select(mask,i,loadu(ptr))); }
 #endif
 
-#if defined(__aarch64__)
-    static __forceinline vuint4 load(const unsigned char* ptr) {
-        return _mm_load4epu8_epi32(((__m128i*)ptr));
-    }
-    static __forceinline vuint4 loadu(const unsigned char* ptr) {
-        return _mm_load4epu8_epi32(((__m128i*)ptr));
-    }
-#elif defined(__SSE4_1__)
+#if defined(__SSE4_1__)
     static __forceinline vuint4 load(const unsigned char* ptr) {
       return _mm_cvtepu8_epi32(_mm_loadl_epi64((__m128i*)ptr));
     }
@@ -121,7 +114,44 @@ namespace embree
 #else
       return vuint4(ptr[0],ptr[1],ptr[2],ptr[3]);
 #endif
-    } 
+    }
+
+#if defined(__aarch64__)
+    static __forceinline vuint4 _mm_load4epu16_epi32(__m128i *ptr)
+    {
+      uint16x8_t t0 = vld1q_u16((uint16_t*)ptr);
+      uint32x4_t t1 = vmovl_u16(vget_low_u16(t0));
+      return vreinterpretq_s32_u32(t1);
+    }
+#endif //defined(__aarch64__)
+   
+    static __forceinline void store_uint8(uint8_t* ptr, const vuint4& v) {
+#if defined(__aarch64__) 
+        uint32x4_t x = uint32x4_t(v.v);
+        uint16x4_t y = vqmovn_u32(x);
+        uint8x8_t z = vqmovn_u16(vcombine_u16(y, y));
+        vst1_lane_u32((uint32_t *)ptr, uint32x2_t(z), 0);
+#elif defined(__SSE4_1__)
+      __m128i x = v;
+      x = _mm_packus_epi32(x, x);
+      x = _mm_packus_epi16(x, x);
+      *(unsigned*)ptr = _mm_cvtsi128_si32(x);
+#else
+      for (size_t i=0;i<4;i++)
+        ptr[i] = (uint8_t)v[i];
+#endif
+    }
+
+    static __forceinline void store_uint8(unsigned short* ptr, const vuint4& v) {
+#if defined(__aarch64__)
+        uint32x4_t x = (uint32x4_t)v.v;
+        uint16x4_t y = vqmovn_u32(x);
+        vst1_u16(ptr, y);
+#else
+      for (size_t i=0;i<4;i++)
+        ptr[i] = (unsigned short)v[i];
+#endif
+    }
 
     static __forceinline vuint4 load_nt(void* ptr) {
 #if (defined(__aarch64__)) || defined(__SSE4_1__)
@@ -133,7 +163,7 @@ namespace embree
     
     static __forceinline void store_nt(void* ptr, const vuint4& v) {
 #if !defined(__aarch64__) && defined(__SSE4_1__)
-      _mm_stream_ps((float*)ptr, _mm_castsi128_ps(v));
+      _mm_stream_ps((float*)ptr,_mm_castsi128_ps(v)); 
 #else
       _mm_store_si128((__m128i*)ptr,v);
 #endif
@@ -384,13 +414,17 @@ namespace embree
     return shuffle<i,i,i,i>(v);
   }
 
-#if defined(__SSE4_1__) && !defined(__aarch64__)
+#if defined(__aarch64__)
+  template<int src> __forceinline unsigned int extract(const vuint4& b);
+  template<int dst> __forceinline vuint4 insert(const vuint4& a, const unsigned b);
+#elif defined(__SSE4_1__)
   template<int src> __forceinline unsigned int extract(const vuint4& b) { return _mm_extract_epi32(b, src); }
   template<int dst> __forceinline vuint4 insert(const vuint4& a, const unsigned b) { return _mm_insert_epi32(a, b, dst); }
 #else
   template<int src> __forceinline unsigned int extract(const vuint4& b) { return b[src&3]; }
   template<int dst> __forceinline vuint4 insert(const vuint4& a, const unsigned b) { vuint4 c = a; c[dst&3] = b; return c; }
 #endif
+
 
   template<> __forceinline unsigned int extract<0>(const vuint4& b) { return _mm_cvtsi128_si32(b); }
 

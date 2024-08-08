@@ -7,28 +7,11 @@ MACRO(_SET_IF_EMPTY VAR VALUE)
   ENDIF()
 ENDMACRO()
 
-IF (EMBREE_ARM)
-  IF ("x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
-    # set ARM an x86 flags for macOS universal binary build
-    SET(FLAGS_SSE2 "-D__SSE__ -D__SSE2__ -msse -msse2 -mno-sse4.2")
-    SET(FLAGS_SSE42 "-D__SSE4_2__  -D__SSE4_1__ -msse4.2")
-    SET(FLAGS_AVX "-D__AVX__ -D__SSE4_2__  -D__SSE4_1__  -D__BMI__ -D__BMI2__ -D__LZCNT__ -mavx")
-    SET(FLAGS_AVX2 "-D__AVX2__ -D__AVX__ -D__SSE4_2__  -D__SSE4_1__  -D__BMI__ -D__BMI2__ -D__LZCNT__ -mf16c -mavx2 -mfma -mlzcnt -mbmi -mbmi2")
-    _SET_IF_EMPTY(FLAGS_AVX512 "-march=skx")
-  ELSE ()
-    SET(FLAGS_SSE2 "-D__SSE__ -D__SSE2__")
-    SET(FLAGS_SSE42 "-D__SSE4_2__  -D__SSE4_1__")
-    SET(FLAGS_AVX "-D__AVX__ -D__SSE4_2__  -D__SSE4_1__  -D__BMI__ -D__BMI2__ -D__LZCNT__")
-    SET(FLAGS_AVX2 "-D__AVX2__ -D__AVX__ -D__SSE4_2__  -D__SSE4_1__  -D__BMI__ -D__BMI2__ -D__LZCNT__")
-  ENDIF ()
-ELSE ()
-  # for `thread` keyword
-  _SET_IF_EMPTY(FLAGS_SSE2  "-msse -msse2 -mno-sse4.2")
-  _SET_IF_EMPTY(FLAGS_SSE42 "-msse4.2")
-  _SET_IF_EMPTY(FLAGS_AVX   "-mavx")
-  _SET_IF_EMPTY(FLAGS_AVX2  "-mf16c -mavx2 -mfma -mlzcnt -mbmi -mbmi2")
-  _SET_IF_EMPTY(FLAGS_AVX512 "-march=skx")
-ENDIF ()
+_SET_IF_EMPTY(FLAGS_SSE2  "-msse2")
+_SET_IF_EMPTY(FLAGS_SSE42 "-msse4.2")
+_SET_IF_EMPTY(FLAGS_AVX   "-mavx")
+_SET_IF_EMPTY(FLAGS_AVX2  "-mf16c -mavx2 -mfma -mlzcnt -mbmi -mbmi2")
+_SET_IF_EMPTY(FLAGS_AVX512 "-march=skx")
 
 IF (WIN32)
 
@@ -78,6 +61,7 @@ IF (WIN32)
   SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${SECURE_LINKER_FLAGS}")
 
   INCLUDE(msvc_post)
+
 ELSE()
 
   OPTION(EMBREE_IGNORE_CMAKE_CXX_FLAGS "When enabled Embree ignores default CMAKE_CXX_FLAGS." ON)
@@ -95,7 +79,7 @@ ELSE()
   ENDIF()
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")                       # generate position independent code suitable for shared libraries
   SET(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fPIC")                       # generate position independent code suitable for shared libraries
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")                  # enables C++11 features    
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")                  # enables C++11 features
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")         # makes all symbols hidden by default
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility-inlines-hidden") # makes all inline symbols hidden by default
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-strict-aliasing")        # disables strict aliasing rules
@@ -113,12 +97,6 @@ ELSE()
   IF (EMBREE_ADDRESS_SANITIZER)
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer -fno-optimize-sibling-calls")
   ENDIF()
-
-  IF (EMSCRIPTEN)
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")              # enable exceptions
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")                  # enable threads
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")                 # enable SIMD intrinsics
-  ENDIF()  
 
   SET(CMAKE_CXX_FLAGS_DEBUG "")
   SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")              # generate debug information
@@ -141,15 +119,12 @@ ELSE()
   ELSE(APPLE)
     IF (NOT EMBREE_ADDRESS_SANITIZER) # for address sanitizer this causes link errors
       SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined") # issues link error for undefined symbols in shared library
+      SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -z noexecstack")     # we do not need an executable stack
+      SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -z relro -z now")    # re-arranges data sections to increase security
+      SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -z noexecstack")           # we do not need an executable stack
+      SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -z relro -z now")          # re-arranges data sections to increase security
       SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")                     # enables position independent execution for executable
-      IF (NOT EMSCRIPTEN)
-        SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -z relro -z now")    # re-arranges data sections to increase security
-        SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -z noexecstack")     # we do not need an executable stack
-        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -z relro -z now")          # re-arranges data sections to increase security
-        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -z noexecstack")           # we do not need an executable stack
-      ENDIF()
     ENDIF()
   ENDIF(APPLE)
-
 
 ENDIF()

@@ -13,9 +13,6 @@
 #include "../simd/arm/emulation.h"
 #else
 #include <immintrin.h>
-#if defined(__EMSCRIPTEN__)
-#include "../simd/wasm/emulation.h"
-#endif
 #endif
 
 #if defined(__BMI__) && defined(__GNUC__) && !defined(__INTEL_COMPILER)
@@ -32,20 +29,18 @@
     #define _lzcnt_u32 __builtin_clz
   #endif
 #else
-  #if defined(__LZCNT__)
-    #if !defined(_lzcnt_u32)
-      #define _lzcnt_u32 __lzcnt32
-    #endif
-    #if !defined(_lzcnt_u64)
-      #define _lzcnt_u64 __lzcnt64
-    #endif
+#if defined(__LZCNT__)
+  #if !defined(_lzcnt_u32)
+    #define _lzcnt_u32 __lzcnt32
   #endif
+  #if !defined(_lzcnt_u64)
+    #define _lzcnt_u64 __lzcnt64
+  #endif
+#endif
 #endif
 
 #if defined(__WIN32__)
-#  if !defined(NOMINMAX)
-#    define NOMINMAX
-#  endif
+#  define NOMINMAX
 #  include <windows.h>
 #endif
 
@@ -64,7 +59,7 @@ namespace embree
 /// Windows Platform
 ////////////////////////////////////////////////////////////////////////////////
   
-#if defined(__WIN32__) && !defined(__INTEL_LLVM_COMPILER)
+#if defined(__WIN32__)
   
   __forceinline size_t read_tsc()  
   {
@@ -89,7 +84,7 @@ namespace embree
 #endif
   }
   
-#if defined(__X86_64__) || defined (__aarch64__)
+#if defined(__X86_64__)
   __forceinline size_t bsf(size_t v) {
 #if defined(__AVX2__) 
     return _tzcnt_u64(v);
@@ -113,7 +108,7 @@ namespace embree
     return i;
   }
   
-#if defined(__X86_64__) || defined (__aarch64__)
+#if defined(__X86_64__)
   __forceinline size_t bscf(size_t& v) 
   {
     size_t i = bsf(v);
@@ -138,7 +133,7 @@ namespace embree
 #endif
   }
   
-#if defined(__X86_64__) || defined (__aarch64__)
+#if defined(__X86_64__)
   __forceinline size_t bsr(size_t v) {
 #if defined(__AVX2__) 
     return 63 -_lzcnt_u64(v);
@@ -196,6 +191,38 @@ namespace embree
   
 #else
   
+#if defined(__i386__) && defined(__PIC__)
+  
+  __forceinline void __cpuid(int out[4], int op) 
+  {
+    asm volatile ("xchg{l}\t{%%}ebx, %1\n\t"
+                  "cpuid\n\t"
+                  "xchg{l}\t{%%}ebx, %1\n\t"
+                  : "=a"(out[0]), "=r"(out[1]), "=c"(out[2]), "=d"(out[3]) 
+                  : "0"(op)); 
+  }
+  
+  __forceinline void __cpuid_count(int out[4], int op1, int op2) 
+  {
+    asm volatile ("xchg{l}\t{%%}ebx, %1\n\t"
+                  "cpuid\n\t"
+                  "xchg{l}\t{%%}ebx, %1\n\t"
+                  : "=a" (out[0]), "=r" (out[1]), "=c" (out[2]), "=d" (out[3])
+                  : "0" (op1), "2" (op2)); 
+  }
+  
+#elif defined(__X86_ASM__)
+
+  __forceinline void __cpuid(int out[4], int op) {
+    asm volatile ("cpuid" : "=a"(out[0]), "=b"(out[1]), "=c"(out[2]), "=d"(out[3]) : "a"(op)); 
+  }
+  
+  __forceinline void __cpuid_count(int out[4], int op1, int op2) {
+    asm volatile ("cpuid" : "=a"(out[0]), "=b"(out[1]), "=c"(out[2]), "=d"(out[3]) : "a"(op1), "c"(op2)); 
+  }
+  
+#endif
+  
   __forceinline uint64_t read_tsc()  {
 #if defined(__X86_ASM__)
     uint32_t high,low;
@@ -211,7 +238,7 @@ namespace embree
 #if defined(__ARM_NEON)
     return __builtin_ctz(v);
 #else
-#if defined(__AVX2__)
+#if defined(__AVX2__) 
     return _tzcnt_u32(v);
 #elif defined(__X86_ASM__)
     int r = 0; asm ("bsf %1,%0" : "=r"(r) : "r"(v)); return r;
@@ -220,13 +247,6 @@ namespace embree
 #endif
 #endif
   }
-
-#if defined(EMBREE_SYCL_SUPPORT) && defined(__SYCL_DEVICE_ONLY__)
-  __forceinline unsigned int   bsf(unsigned v) {
-    return sycl::ctz(v);
-  }
-
-#else
   
 #if defined(__64BIT__)
   __forceinline unsigned bsf(unsigned v) 
@@ -234,7 +254,7 @@ namespace embree
 #if defined(__ARM_NEON)
     return __builtin_ctz(v);
 #else
-#if defined(__AVX2__)
+#if defined(__AVX2__) 
     return _tzcnt_u32(v);
 #elif defined(__X86_ASM__)
     unsigned r = 0; asm ("bsf %1,%0" : "=r"(r) : "r"(v)); return r;
@@ -244,13 +264,6 @@ namespace embree
 #endif
   }
 #endif
-#endif
-  
-#if defined(EMBREE_SYCL_SUPPORT) && defined(__SYCL_DEVICE_ONLY__)
-  __forceinline size_t bsf(size_t v) {
-    return sycl::ctz(v);
-  }
-#else
   
   __forceinline size_t bsf(size_t v) {
 #if defined(__AVX2__) && !defined(__aarch64__)
@@ -265,7 +278,6 @@ namespace embree
     return __builtin_ctzl(v);
 #endif
   }
-#endif
 
   __forceinline int bscf(int& v) 
   {
@@ -300,7 +312,7 @@ namespace embree
 #endif
   }
   
-#if defined(__64BIT__) || defined(__EMSCRIPTEN__)
+#if defined(__64BIT__)
   __forceinline unsigned bsr(unsigned v) {
 #if defined(__AVX2__) 
     return 31 - _lzcnt_u32(v);
@@ -364,7 +376,7 @@ namespace embree
 #if defined(__X86_ASM__)
     int r = 0; asm ("bts %1,%0" : "=r"(r) : "r"(i), "0"(v) : "flags"); return r;
 #else
-    return (v | (1 << i));
+    return (v | (v << i));
 #endif
   }
   
@@ -372,7 +384,7 @@ namespace embree
 #if defined(__X86_ASM__)
     int r = 0; asm ("btr %1,%0" : "=r"(r) : "r"(i), "0"(v) : "flags"); return r;
 #else
-    return (v & ~(1 << i));
+    return (v & ~(v << i));
 #endif
   }
   
@@ -388,7 +400,7 @@ namespace embree
 #if defined(__X86_ASM__)
     size_t r = 0; asm ("bts %1,%0" : "=r"(r) : "r"(i), "0"(v) : "flags"); return r;
 #else
-    return (v | (1 << i));
+    return (v | (v << i));
 #endif
   }
   
@@ -396,7 +408,7 @@ namespace embree
 #if defined(__X86_ASM__)
     size_t r = 0; asm ("btr %1,%0" : "=r"(r) : "r"(i), "0"(v) : "flags"); return r;
 #else
-    return (v & ~(1 << i));
+    return (v & ~(v << i));
 #endif
   }
 
@@ -406,41 +418,6 @@ namespace embree
   
 #endif
   
-#if !defined(__WIN32__)
-
-#if defined(__i386__) && defined(__PIC__)
-
-  __forceinline void __cpuid(int out[4], int op)
-  {
-    asm volatile ("xchg{l}\t{%%}ebx, %1\n\t"
-                  "cpuid\n\t"
-                  "xchg{l}\t{%%}ebx, %1\n\t"
-                  : "=a"(out[0]), "=r"(out[1]), "=c"(out[2]), "=d"(out[3])
-                  : "0"(op));
-  }
-
-  __forceinline void __cpuid_count(int out[4], int op1, int op2)
-  {
-    asm volatile ("xchg{l}\t{%%}ebx, %1\n\t"
-                  "cpuid\n\t"
-                  "xchg{l}\t{%%}ebx, %1\n\t"
-                  : "=a" (out[0]), "=r" (out[1]), "=c" (out[2]), "=d" (out[3])
-                  : "0" (op1), "2" (op2));
-  }
-
-#elif defined(__X86_ASM__)
-
-  __forceinline void __cpuid(int out[4], int op) {
-    asm volatile ("cpuid" : "=a"(out[0]), "=b"(out[1]), "=c"(out[2]), "=d"(out[3]) : "a"(op));
-  }
-
-  __forceinline void __cpuid_count(int out[4], int op1, int op2) {
-    asm volatile ("cpuid" : "=a"(out[0]), "=b"(out[1]), "=c"(out[2]), "=d"(out[3]) : "a"(op1), "c"(op2));
-  }
-
-#endif
-#endif
-
 ////////////////////////////////////////////////////////////////////////////////
 /// All Platforms
 ////////////////////////////////////////////////////////////////////////////////
@@ -466,15 +443,7 @@ namespace embree
 #endif
 #endif
 
-#if defined(EMBREE_SYCL_SUPPORT) && defined(__SYCL_DEVICE_ONLY__)
-
-  __forceinline unsigned int popcnt(unsigned int in) {
-    return sycl::popcount(in);
-  }
-  
-#else
-  
-#if defined(__SSE4_2__) || defined(__ARM_NEON)
+#if defined(__SSE4_2__)
   
   __forceinline int popcnt(int in) {
     return _mm_popcnt_u32(in);
@@ -488,8 +457,6 @@ namespace embree
   __forceinline size_t popcnt(size_t in) {
     return _mm_popcnt_u64(in);
   }
-#endif
-  
 #endif
   
 #endif
@@ -524,12 +491,12 @@ namespace embree
 #endif
   }
 
-  __forceinline void prefetchL1EX(const void* ptr) {
-    prefetchEX(ptr);
+  __forceinline void prefetchL1EX(const void* ptr) { 
+    prefetchEX(ptr); 
   }
-
-  __forceinline void prefetchL2EX(const void* ptr) {
-    prefetchEX(ptr);
+  
+  __forceinline void prefetchL2EX(const void* ptr) { 
+    prefetchEX(ptr); 
   }
 #if defined(__AVX2__) && !defined(__aarch64__)
    __forceinline unsigned int pext(unsigned int a, unsigned int b) { return _pext_u32(a, b); }

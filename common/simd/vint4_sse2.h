@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../math/emath.h"
+#include "../math/math.h"
 
 #define vboolf vboolf_impl
 #define vboold vboold_impl
@@ -106,14 +106,7 @@ namespace embree
 #endif
 
 
-#if defined(__aarch64__)
-    static __forceinline vint4 load(const unsigned char* ptr) {
-        return _mm_load4epu8_epi32(((__m128i*)ptr));
-    }
-    static __forceinline vint4 loadu(const unsigned char* ptr) {
-        return  _mm_load4epu8_epi32(((__m128i*)ptr));
-    }
-#elif defined(__SSE4_1__)
+#if defined(__SSE4_1__)
     static __forceinline vint4 load(const unsigned char* ptr) {
       return _mm_cvtepu8_epi32(_mm_loadl_epi64((__m128i*)ptr));
     }
@@ -242,7 +235,7 @@ namespace embree
 #endif
     }
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__)
     static __forceinline vint4 broadcast64(long long a) { return _mm_set1_epi64x(a); }
 #endif
 
@@ -316,8 +309,8 @@ namespace embree
   __forceinline vint4 operator ^(const vint4& a, int          b) { return a ^ vint4(b); }
   __forceinline vint4 operator ^(int          a, const vint4& b) { return vint4(a) ^ b; }
 
-  __forceinline vint4 operator <<(const vint4& a, const int n) { return _mm_slli_epi32(a, n); }
-  __forceinline vint4 operator >>(const vint4& a, const int n) { return _mm_srai_epi32(a, n); }
+  __forceinline vint4 operator <<(const vint4& a, int n) { return _mm_slli_epi32(a, n); }
+  __forceinline vint4 operator >>(const vint4& a, int n) { return _mm_srai_epi32(a, n); }
 
   __forceinline vint4 sll (const vint4& a, int b) { return _mm_slli_epi32(a, b); }
   __forceinline vint4 sra (const vint4& a, int b) { return _mm_srai_epi32(a, b); }
@@ -472,7 +465,10 @@ namespace embree
     return shuffle<i,i,i,i>(v);
   }
 
-#if defined(__SSE4_1__) && !defined(__aarch64__)
+#if defined(__aarch64__)
+    template<int src> __forceinline int extract(const vint4& b);
+    template<int dst> __forceinline vint4 insert(const vint4& a, const int b);
+#elif defined(__SSE4_1__)
   template<int src> __forceinline int extract(const vint4& b) { return _mm_extract_epi32(b, src); }
   template<int dst> __forceinline vint4 insert(const vint4& a, const int b) { return _mm_insert_epi32(a, b, dst); }
 #else
@@ -480,28 +476,66 @@ namespace embree
   template<int dst> __forceinline vint4 insert(const vint4& a, int b) { vint4 c = a; c[dst&3] = b; return c; }
 #endif
 
-  template<> __forceinline int extract<0>(const vint4& b) { return _mm_cvtsi128_si32(b); }
-  
-  __forceinline int toScalar(const vint4& v) { return _mm_cvtsi128_si32(v); }
-  
 #if defined(__aarch64__)
-  __forceinline size_t toSizeT(const vint4& v) {
-    uint64x2_t x = uint64x2_t(v.v);
-    return x[0];
-  }
+    template<> __forceinline int extract<0>(const vint4& b) {
+        return b.v[0];
+    }
+    template<> __forceinline int extract<1>(const vint4& b) {
+        return b.v[1];
+    }
+    template<> __forceinline int extract<2>(const vint4& b) {
+        return b.v[2];
+    }
+    template<> __forceinline int extract<3>(const vint4& b) {
+        return b.v[3];
+    }
+    template<> __forceinline vint4 insert<0>(const vint4& a, int b)
+    {
+        vint4 c = a;
+        c[0] = b;
+        return c;
+    }
+    template<> __forceinline vint4 insert<1>(const vint4& a, int b)
+    {
+        vint4 c = a;
+        c[1] = b;
+        return c;
+    }
+    template<> __forceinline vint4 insert<2>(const vint4& a, int b)
+    {
+        vint4 c = a;
+        c[2] = b;
+        return c;
+    }
+    template<> __forceinline vint4 insert<3>(const vint4& a, int b)
+    {
+        vint4 c = a;
+        c[3] = b;
+        return c;
+    }
+      
+    __forceinline int toScalar(const vint4& v) {
+        return v[0];
+    }
+      
+    __forceinline size_t toSizeT(const vint4& v) {
+        uint64x2_t x = uint64x2_t(v.v);
+        return x[0];
+    }
 #else
-__forceinline size_t toSizeT(const vint4& v) { 
+  template<> __forceinline int extract<0>(const vint4& b) { return _mm_cvtsi128_si32(b); }
+
+  __forceinline int toScalar(const vint4& v) { return _mm_cvtsi128_si32(v); }
+
+  __forceinline size_t toSizeT(const vint4& v) { 
 #if defined(__WIN32__) && !defined(__X86_64__) // win32 workaround
     return toScalar(v);
-#elif defined(__ARM_NEON)
-    // FIXME(LTE): Do we need a swap(i.e. use lane 1)?
-    return vgetq_lane_u64(*(reinterpret_cast<const uint64x2_t *>(&v)), 0);
 #else
     return _mm_cvtsi128_si64(v); 
 #endif
   }
 #endif
-
+      
 #if defined(__AVX512VL__)
 
   __forceinline vint4 permute(const vint4 &a, const vint4 &index) {
@@ -519,12 +553,12 @@ __forceinline size_t toSizeT(const vint4& v) {
   ////////////////////////////////////////////////////////////////////////////////
 
 #if defined(__aarch64__) || defined(__SSE4_1__)
-
+      
 #if defined(__aarch64__)
     __forceinline vint4 vreduce_min(const vint4& v) { int h = vminvq_s32(v); return vdupq_n_s32(h); }
     __forceinline vint4 vreduce_max(const vint4& v) { int h = vmaxvq_s32(v); return vdupq_n_s32(h); }
     __forceinline vint4 vreduce_add(const vint4& v) { int h = vaddvq_s32(v); return vdupq_n_s32(h); }
-
+      
     __forceinline int reduce_min(const vint4& v) { return vminvq_s32(v); }
     __forceinline int reduce_max(const vint4& v) { return vmaxvq_s32(v); }
     __forceinline int reduce_add(const vint4& v) { return vaddvq_s32(v); }
@@ -537,7 +571,7 @@ __forceinline size_t toSizeT(const vint4& v) {
   __forceinline int reduce_max(const vint4& v) { return toScalar(vreduce_max(v)); }
   __forceinline int reduce_add(const vint4& v) { return toScalar(vreduce_add(v)); }
 #endif
-
+      
   __forceinline size_t select_min(const vint4& v) { return bsf(movemask(v == vreduce_min(v))); }
   __forceinline size_t select_max(const vint4& v) { return bsf(movemask(v == vreduce_max(v))); }
 

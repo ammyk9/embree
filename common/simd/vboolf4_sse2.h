@@ -36,20 +36,22 @@ namespace embree
 
     __forceinline vboolf(__m128 input) : v(input) {}
     __forceinline operator const __m128&() const { return v; }
-    #if !defined(__EMSCRIPTEN__)
     __forceinline operator const __m128i() const { return _mm_castps_si128(v); }
     __forceinline operator const __m128d() const { return _mm_castps_pd(v); }
-    #endif
-
+    
     __forceinline vboolf(bool a)
       : v(mm_lookupmask_ps[(size_t(a) << 3) | (size_t(a) << 2) | (size_t(a) << 1) | size_t(a)]) {}
     __forceinline vboolf(bool a, bool b)
       : v(mm_lookupmask_ps[(size_t(b) << 3) | (size_t(a) << 2) | (size_t(b) << 1) | size_t(a)]) {}
     __forceinline vboolf(bool a, bool b, bool c, bool d)
       : v(mm_lookupmask_ps[(size_t(d) << 3) | (size_t(c) << 2) | (size_t(b) << 1) | size_t(a)]) {}
+#if defined(__aarch64__)
+      __forceinline vboolf(int mask) { v = mm_lookupmask_ps[mask]; }
+      __forceinline vboolf(unsigned int mask) { v = mm_lookupmask_ps[mask]; }
+#else
     __forceinline vboolf(int mask) { assert(mask >= 0 && mask < 16); v = mm_lookupmask_ps[mask]; }
     __forceinline vboolf(unsigned int mask) { assert(mask < 16); v = mm_lookupmask_ps[mask]; }
-
+#endif
     /* return int32 mask */
     __forceinline __m128i mask32() const { 
       return _mm_castps_si128(v);
@@ -102,7 +104,7 @@ namespace embree
   __forceinline vboolf4 operator ==(const vboolf4& a, const vboolf4& b) { return _mm_castsi128_ps(_mm_cmpeq_epi32(a, b)); }
   
   __forceinline vboolf4 select(const vboolf4& m, const vboolf4& t, const vboolf4& f) {
-#if defined(__aarch64__) || defined(__SSE4_1__)
+#if defined(__SSE4_1__)
     return _mm_blendv_ps(f, t, m); 
 #else
     return _mm_or_ps(_mm_and_ps(m, t), _mm_andnot_ps(m, f)); 
@@ -119,7 +121,7 @@ namespace embree
 #if defined(__aarch64__)
   template<int i0, int i1, int i2, int i3>
   __forceinline vboolf4 shuffle(const vboolf4& v) {
-    return vreinterpretq_f32_u8(vqtbl1q_u8( vreinterpretq_u8_s32((int32x4_t)v.v), _MN_SHUFFLE(i0, i1, i2, i3)));
+    return vreinterpretq_f32_u8(vqtbl1q_u8( vreinterpretq_u8_s32(v), _MN_SHUFFLE(i0, i1, i2, i3)));
   }
 
   template<int i0, int i1, int i2, int i3>
@@ -171,9 +173,7 @@ namespace embree
   __forceinline bool none(const vboolf4& valid, const vboolf4& b) { return none(valid & b); }
   
   __forceinline size_t movemask(const vboolf4& a) { return _mm_movemask_ps(a); }
-#if defined(__aarch64__)
-  __forceinline size_t popcnt(const vboolf4& a) { return vaddvq_s32(vandq_u32(vreinterpretq_u32_f32(a.v),_mm_set1_epi32(1))); }
-#elif defined(__SSE4_2__)
+#if defined(__SSE4_2__)
   __forceinline size_t popcnt(const vboolf4& a) { return popcnt((size_t)_mm_movemask_ps(a)); }
 #else
   __forceinline size_t popcnt(const vboolf4& a) { return bool(a[0])+bool(a[1])+bool(a[2])+bool(a[3]); }
