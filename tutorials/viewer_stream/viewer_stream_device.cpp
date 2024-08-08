@@ -26,7 +26,8 @@ namespace embree {
 //#define rtcOccluded rtcIntersect
 //#define rtcOccluded1M rtcIntersect1M
 
-#define SIMPLE_SHADING 0
+#define SIMPLE_SHADING 1
+#define SHADING 1
 
 extern "C" ISPCScene* g_ispc_scene;
 
@@ -169,6 +170,7 @@ void renderTileStandard(int taskIndex,
     rtcIntersect1M(g_scene,&context,&rays[i],1,sizeof(RTCRay));
 #endif
 
+#if SHADING == 1
   /* shade stream of rays */
   N = 0;
   for (unsigned int y=y0; y<y1; y++) for (unsigned int x=x0; x<x1; x++)
@@ -192,6 +194,7 @@ void renderTileStandard(int taskIndex,
     unsigned int b = (unsigned int) (255.0f * clamp(color.z,0.0f,1.0f));
     pixels[y*width+x] = (b << 16) + (g << 8) + r;
   }
+#endif
 }
 
 /* task that renders a single screen tile */
