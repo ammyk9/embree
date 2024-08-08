@@ -87,12 +87,19 @@ namespace embree
     assert((align & (align-1)) == 0);
     total_allocations++;    
 
+    if (mode == EMBREE_USM_SHARED_DEVICE_READ_ONLY)
+      mode = EMBREE_USM_SHARED;
+    
     void* ptr = nullptr;
     if (mode == EMBREE_USM_SHARED_DEVICE_READ_ONLY)
       ptr = sycl::aligned_alloc_shared(align,size,*device,*context,sycl::ext::oneapi::property::usm::device_read_only());
-    else
+    else if (mode == EMBREE_DEVICE_READ_WRITE)
+      ptr = sycl::aligned_alloc_device(align,size,*device,*context);      
+    else if (mode == EMBREE_USM_SHARED)     
       ptr = sycl::aligned_alloc_shared(align,size,*device,*context);
-      
+    else if (mode == EMBREE_USM_HOST)
+      ptr = sycl::aligned_alloc(align,size,*device,*context,sycl::usm::alloc::host);      
+    
     if (size != 0 && ptr == nullptr)
       throw std::bad_alloc();
 

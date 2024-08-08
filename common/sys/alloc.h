@@ -26,12 +26,22 @@ namespace embree
   void operator delete(void* ptr) { alignedFree(ptr); }                   \
   void* operator new[](size_t size) { return alignedMalloc(size,align); } \
   void operator delete[](void* ptr) { alignedFree(ptr); }
+
+#if 0
   
 #define ALIGNED_STRUCT_USM_(align)                                          \
-  void* operator new(size_t size) { return alignedUSMMalloc(size,align); }   \
+  void* operator new(size_t size) { return alignedUSMMalloc(size,align,EMBREE_USM_HOST); } \
   void operator delete(void* ptr) { alignedUSMFree(ptr); }                   \
-  void* operator new[](size_t size) { return alignedUSMMalloc(size,align); } \
+  void* operator new[](size_t size) { return alignedUSMMalloc(size,align,EMBREE_USM_HOST); } \
   void operator delete[](void* ptr) { alignedUSMFree(ptr); }
+#else  
+
+#define ALIGNED_STRUCT_USM_(align)                                      \
+  void* operator new(size_t size) { return alignedUSMMalloc(size,align,EMBREE_USM_SHARED); } \
+  void operator delete(void* ptr) { alignedUSMFree(ptr); }                   \
+  void* operator new[](size_t size) { return alignedUSMMalloc(size,align,EMBREE_USM_SHARED); } \
+  void operator delete[](void* ptr) { alignedUSMFree(ptr); }
+#endif
   
 #define ALIGNED_CLASS_(align)                                          \
  public:                                                               \
@@ -46,7 +56,9 @@ namespace embree
   enum EmbreeUSMMode {
     EMBREE_USM_SHARED = 0,
     EMBREE_USM_SHARED_DEVICE_READ_WRITE = 0,
-    EMBREE_USM_SHARED_DEVICE_READ_ONLY = 1
+    EMBREE_USM_SHARED_DEVICE_READ_ONLY = 1,
+    EMBREE_DEVICE_READ_WRITE = 2,
+    EMBREE_USM_HOST = 3
   };
   
   /*! aligned allocation */

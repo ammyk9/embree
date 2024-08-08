@@ -39,12 +39,8 @@ Possible error codes returned by `rtcGetDeviceError` are:
 + `RTC_ERROR_CANCELLED`: The operation got canceled by a memory
   monitor callback or progress monitor callback function.
 
-+ `RTC_ERROR_LEVEL_ZERO_RAYTRACING_SUPPORT_MISSING`: This error can occur when
-  creating an Embree device with SYCL support using `rtcNewSYCLDevice` fails.
-  This error probably means that the GPU driver is to old or not installed
-  properly. Install a new GPU driver and on Linux make sure that the package
-  `intel-level-zero-gpu-raytracing` is installed. For general driver installation
-  information for Linux refer to [https://dgpu-docs.intel.com](https://dgpu-docs.intel.com).
++ `RTC_ERROR_UNSUPPORTED_GPU`: The specified SYCL GPU device is not
+supported.
 
 When the device construction fails, `rtcNewDevice` returns `NULL` as
 device. To detect the error code of a such a failed device
@@ -52,16 +48,10 @@ construction, pass `NULL` as device to the `rtcGetDeviceError`
 function. For all other invocations of `rtcGetDeviceError`, a proper
 device pointer must be specified.
 
-The API function `rtcGetDeviceLastErrorMessage` can be used to get more details
-about the last `RTCError` a `RTCDevice` encountered.
-
-For convenient reporting of a `RTCError`, the API function `rtcGetErrorString`
-can be used, which returns a string representation of a given `RTCError`.
-
 #### EXIT STATUS
 
 Returns the error code for the device.
 
 #### SEE ALSO
 
-[rtcSetDeviceErrorFunction], [rtcGetDeviceLastErrorMessage], [rtcGetErrorString]
+[rtcSetDeviceErrorFunction]

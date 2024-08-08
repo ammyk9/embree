@@ -30,7 +30,8 @@ namespace embree
   extern "C" bool device_pick(const float x, const float y, const ISPCCamera& camera, Vec3fa& hitPos);
   //extern "C" void device_key_pressed (int key);
   extern "C" void device_cleanup();
-
+  extern "C" void device_gui();
+  
   template<typename Ty>
     struct Averaged
   {
@@ -147,6 +148,7 @@ namespace embree
     unsigned width;
     unsigned height;
     unsigned* pixels;
+    unsigned* pixels_device;
 
     /* image output settings */
     FileName outputImageFilename;
@@ -179,6 +181,7 @@ namespace embree
     Averaged<double> avg_render_time;
     Averaged<double> avg_frame_time;
     Averaged<double> avg_mrayps;
+    
     bool print_camera;
 
     int debug0;
@@ -239,6 +242,7 @@ namespace embree
       CONVERT_QUADS_TO_GRIDS,
       CONVERT_GRIDS_TO_QUADS,
       CONVERT_MBLUR_TO_NONMBLUR,
+      SUBDIVIDE_GRIDS,
     };
     std::vector<SceneGraphOperations> sgop;
     std::vector<std::function<void()>> futures; // future scene graph operations
@@ -253,5 +257,8 @@ namespace embree
     std::string subdiv_mode;
     bool print_scene_cameras;
     std::string camera_name;
+    bool displace;
+    unsigned int displace_resX,displace_resY;
+    float displace_height;
   };
 }

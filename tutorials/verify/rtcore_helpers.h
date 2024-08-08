@@ -19,6 +19,7 @@ namespace embree
     case RTC_ERROR_OUT_OF_MEMORY    : return "RTC_ERROR_OUT_OF_MEMORY";
     case RTC_ERROR_UNSUPPORTED_CPU  : return "RTC_ERROR_UNSUPPORTED_CPU";
     case RTC_ERROR_CANCELLED        : return "RTC_ERROR_CANCELLED";
+    case RTC_ERROR_UNSUPPORTED_GPU  : return "RTC_ERROR_UNSUPPORTED_GPU";
     default                         : return "invalid error code";
     }
   }
@@ -669,7 +670,7 @@ namespace embree
     else if (quality_flags == RTC_BUILD_QUALITY_MEDIUM) return "MediumQuality";
     else if (quality_flags == RTC_BUILD_QUALITY_HIGH  ) return "HighQuality";
     else if (quality_flags == RTC_BUILD_QUALITY_REFIT ) return "RefitQuality";
-    else { assert(false); return ""; }
+    return "";
   }
 
   struct SceneFlags

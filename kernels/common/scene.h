@@ -1,93 +1,39 @@
-// ======================================================================== //
-// Copyright 2009-2017 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2021 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
  
 #pragma once
 
 #include "default.h"
 #include "device.h"
+#include "builder.h"
 #include "scene_triangle_mesh.h"
 #include "scene_quad_mesh.h"
 #include "scene_user_geometry.h"
 #include "scene_instance.h"
-#include "scene_geometry_instance.h"
-#include "scene_bezier_curves.h"
+#include "scene_curves.h"
 #include "scene_line_segments.h"
 #include "scene_subdiv_mesh.h"
-
+#include "scene_grid_mesh.h"
+#include "scene_points.h"
+#include "scene_lossy_compressed_geometry.h"
 #include "../subdiv/tessellation_cache.h"
 
 #include "acceln.h"
 #include "geometry.h"
 
+#if defined(EMBREE_SYCL_SUPPORT)
+#include "../sycl/rthwif_embree_builder.h"
+#endif
+
 namespace embree
 {
-  struct DeviceInterface;
-  struct SceneInterface
-  {
-    virtual ~SceneInterface() {};
-    virtual DeviceInterface* getDevice() = 0;
-    virtual void setProgressMonitorFunction(RTCProgressMonitorFunc func, void* ptr) = 0;
-    virtual unsigned int newUserGeometry (RTCGeometryFlags gflags, size_t items, size_t numTimeSteps) = 0;
-    virtual unsigned int newInstance (SceneInterface* scene, size_t numTimeSteps) = 0;
-    virtual unsigned int newGeometryInstance (unsigned geomID) = 0;
-    virtual unsigned int newGeometryGroup (RTCGeometryFlags gflags, unsigned* geomIDs, size_t N) = 0;
-    virtual unsigned int newTriangleMesh (RTCGeometryFlags flags, size_t maxTriangles, size_t maxVertices, size_t numTimeSteps) = 0;
-    virtual unsigned int newQuadMesh (RTCGeometryFlags flags, size_t maxQuads, size_t maxVertices, size_t numTimeSteps) = 0;
-    virtual unsigned int newCurves (int subtype, int basis, RTCGeometryFlags flags, size_t maxCurves, size_t maxVertices, size_t numTimeSteps) = 0;
-    virtual unsigned int newLineSegments (RTCGeometryFlags flags, size_t maxSegments, size_t maxVertices, size_t numTimeSteps) = 0;
-    virtual unsigned int newSubdivisionMesh (RTCGeometryFlags flags, size_t numFaces, size_t numEdges, size_t numVertices, size_t numEdgeCreases, size_t numVertexCreases, size_t numHoles, size_t numTimeSteps) = 0;
-    virtual void commit (size_t threadIndex, size_t threadCount, bool useThreadPool) = 0;
-    virtual GeometryInterface* getGeometry(unsigned geomID) = 0;
-    virtual GeometryInterface* getGeometryLocked(unsigned geomID) = 0;
-    virtual void deleteGeometry(size_t geomID) = 0;
-    virtual void rtcGetBounds(RTCBounds& bounds_o) = 0;
-    virtual void rtcGetLinearBounds(RTCBounds* bounds_o) = 0;
-    virtual void rtcIntersect (RTCRay& ray) = 0;
-    virtual void rtcIntersect1Ex (const RTCIntersectContext* user_context, RTCRay& ray) = 0;
-    virtual void rtcIntersect4 (const void* valid, RTCRay4& ray) = 0;
-    virtual void rtcIntersect4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray) = 0;
-    virtual void rtcIntersect8 (const void* valid, RTCRay8& ray) = 0;
-    virtual void rtcIntersect8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray) = 0;
-    virtual void rtcIntersect16 (const void* valid, RTCRay16& ray) = 0;
-    virtual void rtcIntersect16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray) = 0;
-    virtual void rtcIntersect1M (const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) = 0;
-    virtual void rtcIntersect1Mp (const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) = 0;
-    virtual void rtcIntersectNM (const RTCIntersectContext* user_context, struct RTCRayN* rays, const size_t N, const size_t M, const size_t stride) = 0;
-    virtual void rtcIntersectNp (const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) = 0;
-    virtual void rtcOccluded (RTCRay& ray) = 0;
-    virtual void rtcOccluded1Ex (const RTCIntersectContext* user_context, RTCRay& ray) = 0;
-    virtual void rtcOccluded4 (const void* valid, RTCRay4& ray) = 0;
-    virtual void rtcOccluded4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray) = 0;
-    virtual void rtcOccluded8 (const void* valid, RTCRay8& ray) = 0;
-    virtual void rtcOccluded8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray) = 0;
-    virtual void rtcOccluded16 (const void* valid, RTCRay16& ray) = 0;
-    virtual void rtcOccluded16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray) = 0;
-    virtual void rtcOccluded1M(const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) = 0;
-    virtual void rtcOccluded1Mp(const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) = 0;
-    virtual void rtcOccludedNM(const RTCIntersectContext* user_context, RTCRayN* rays, const size_t N, const size_t M, const size_t stride) = 0;
-    virtual void rtcOccludedNp(const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) = 0;
-  };
+  struct TaskGroup;
 
-namespace isa
-{
   /*! Base class all scenes are derived from */
-  class Scene : public SceneInterface, public Accel
+  class Scene : public AccelN
   {
-    ALIGNED_CLASS;
- 
+    ALIGNED_CLASS_USM_(std::alignment_of<Scene>::value);
+
   public:
     template<typename Ty, bool mblur = false>
       class Iterator
@@ -100,10 +46,11 @@ namespace isa
       
       __forceinline Ty* at(const size_t i)
       {
-        Geometry* geom = scene->geometries[i];
+        Geometry* geom = scene->geometries[i].ptr;
         if (geom == nullptr) return nullptr;
         if (!all && !geom->isEnabled()) return nullptr;
-        if (geom->getType() != Ty::geom_type) return nullptr;
+        const size_t mask = geom->getTypeMask() & Ty::geom_type; 
+        if (!(mask)) return nullptr;
         if ((geom->numTimeSteps != 1) != mblur) return nullptr;
         return (Ty*) geom;
       }
@@ -117,7 +64,7 @@ namespace isa
       }
       
       __forceinline size_t numPrimitives() const {
-        return scene->getNumPrimitives<Ty,mblur>();
+        return scene->getNumPrimitives(Ty::geom_type,mblur);
       }
 
       __forceinline size_t maxPrimitivesPerGeometry() 
@@ -127,6 +74,17 @@ namespace isa
           Ty* mesh = at(i);
           if (mesh == nullptr) continue;
           ret = max(ret,mesh->size());
+        }
+        return ret;
+      }
+
+      __forceinline unsigned int maxGeomID() 
+      {
+        unsigned int ret = 0;
+        for (size_t i=0; i<scene->size(); i++) {
+          Ty* mesh = at(i);
+          if (mesh == nullptr) continue;
+          ret = max(ret,(unsigned int)i);
         }
         return ret;
       }
@@ -147,84 +105,97 @@ namespace isa
       bool all;
       };
 
+      class Iterator2
+      {
+      public:
+      Iterator2 () {}
+      
+      Iterator2 (Scene* scene, Geometry::GTypeMask typemask, bool mblur) 
+      : scene(scene), typemask(typemask), mblur(mblur) {}
+      
+      __forceinline Geometry* at(const size_t i)
+      {
+        Geometry* geom = scene->geometries[i].ptr;
+        if (geom == nullptr) return nullptr;
+        if (!geom->isEnabled()) return nullptr;
+        if (!(geom->getTypeMask() & typemask)) return nullptr;
+        if ((geom->numTimeSteps != 1) != mblur) return nullptr;
+        return geom;
+      }
+
+      __forceinline Geometry* operator[] (const size_t i) {
+        return at(i);
+      }
+
+      __forceinline size_t size() const {
+        return scene->size();
+      }
+      
+    private:
+      Scene* scene;
+      Geometry::GTypeMask typemask;
+      bool mblur;
+    };
+
   public:
     
     /*! Scene construction */
-    Scene (Device* device, RTCSceneFlags flags, RTCAlgorithmFlags aflags);
+    Scene (Device* device);
+
+    /*! Scene destruction */
+    ~Scene () noexcept;
 
   private:
+    
     /*! class is non-copyable */
     Scene (const Scene& other) DELETED; // do not implement
     Scene& operator= (const Scene& other) DELETED; // do not implement
 
   public:
     void createTriangleAccel();
-    void createQuadAccel();
     void createTriangleMBAccel();
+    void createQuadAccel();
     void createQuadMBAccel();
     void createHairAccel();
     void createHairMBAccel();
-    void createLineAccel();
-    void createLineMBAccel();
     void createSubdivAccel();
     void createSubdivMBAccel();
     void createUserGeometryAccel();
     void createUserGeometryMBAccel();
+    void createInstanceAccel();
+    void createInstanceMBAccel();
+    void createInstanceExpensiveAccel();
+    void createInstanceExpensiveMBAccel();
+    void createGridAccel();
+    void createGridMBAccel();
 
-    /*! Scene destruction */
-    ~Scene ();
-    
+    /*! prints statistics about the scene */
+    void printStatistics();
+
     /*! clears the scene */
     void clear();
 
-    /*! Creates new user geometry. */
-    unsigned int newUserGeometry (RTCGeometryFlags gflags, size_t items, size_t numTimeSteps);
+    /*! detaches some geometry */
+    void detachGeometry(size_t geomID);
 
-    /*! Creates a new scene instance. */
-    unsigned int newInstance (SceneInterface* scene, size_t numTimeSteps);
+    void setBuildQuality(RTCBuildQuality quality_flags);
+    RTCBuildQuality getBuildQuality() const;
+    
+    void setSceneFlags(RTCSceneFlags scene_flags);
+    RTCSceneFlags getSceneFlags() const;
 
-    /*! Creates a new geometry instance. */
-    unsigned int newGeometryInstance (Geometry* geom);
-    unsigned int newGeometryInstance (unsigned geomID);
-
-    /*! Creates a new geometry group. */
-    unsigned int newGeometryGroup (RTCGeometryFlags gflags, const std::vector<Geometry*> geometries);
-    unsigned int newGeometryGroup (RTCGeometryFlags gflags, unsigned* geomIDs, size_t N);
-
-    /*! Creates a new triangle mesh. */
-    unsigned int newTriangleMesh (RTCGeometryFlags flags, size_t maxTriangles, size_t maxVertices, size_t numTimeSteps);
-
-    /*! Creates a new quad mesh. */
-    unsigned int newQuadMesh (RTCGeometryFlags flags, size_t maxQuads, size_t maxVertices, size_t numTimeSteps);
-
-    /*! Creates a new collection of quadratic bezier curves. */
-    unsigned int newCurves (int subtype, int basis, RTCGeometryFlags flags, size_t maxCurves, size_t maxVertices, size_t numTimeSteps);
-
-    /*! Creates a new collection of line segments. */
-    unsigned int newLineSegments (RTCGeometryFlags flags, size_t maxSegments, size_t maxVertices, size_t numTimeSteps);
-
-    /*! Creates a new subdivision mesh. */
-    unsigned int newSubdivisionMesh (RTCGeometryFlags flags, size_t numFaces, size_t numEdges, size_t numVertices, size_t numEdgeCreases, size_t numVertexCreases, size_t numHoles, size_t numTimeSteps);
-
-    /*! deletes some geometry */
-    void deleteGeometry(size_t geomID);
-
-    /*! Builds acceleration structure for the scene. */
-    void commit (size_t threadIndex, size_t threadCount, bool useThreadPool);
+    void build_cpu_accels();
+    void build_gpu_accels();
+    void commit (bool join);
     void commit_task ();
     void build () {}
-
-    void updateInterface();
 
     /* return number of geometries */
     __forceinline size_t size() const { return geometries.size(); }
     
-    /* add user geometry to scene */
-    unsigned int add (Geometry* geometry);
+    /* bind geometry to the scene */
+    unsigned int bind (unsigned geomID, Ref<Geometry> geometry);
     
-    /* determines of the scene is ready to get build */
-    bool ready() { return numMappedBuffers == 0; }
-
     /* determines if scene is modified */
     __forceinline bool isModified() const { return modified; }
 
@@ -233,99 +204,102 @@ namespace isa
       modified = f; 
     }
 
+    __forceinline bool isGeometryModified(size_t geomID)
+    {
+      Ref<Geometry>& g = geometries[geomID];
+      if (!g) return false;
+      return g->getModCounter() > geometryModCounters_[geomID];
+    }
+
+  protected:
+
+    void checkIfModifiedAndSet ();
+
+  public:
+
     /* get mesh by ID */
-    __forceinline       Geometry* get(size_t i)       { assert(i < geometries.size()); return geometries[i]; }
-    __forceinline const Geometry* get(size_t i) const { assert(i < geometries.size()); return geometries[i]; }
+    __forceinline       Geometry* get(size_t i)       { assert(i < geometries.size()); return geometries[i].ptr; }
+    __forceinline const Geometry* get(size_t i) const { assert(i < geometries.size()); return geometries[i].ptr; }
 
     template<typename Mesh>
       __forceinline       Mesh* get(size_t i)       { 
       assert(i < geometries.size()); 
-      assert(geometries[i]->getType() == Mesh::geom_type);
-      return (Mesh*)geometries[i]; 
+      assert(geometries[i]->getTypeMask() & Mesh::geom_type);
+      return (Mesh*)geometries[i].ptr; 
     }
     template<typename Mesh>
       __forceinline const Mesh* get(size_t i) const { 
       assert(i < geometries.size()); 
-      assert(geometries[i]->getType() == Mesh::geom_type);
-      return (Mesh*)geometries[i]; 
+      assert(geometries[i]->getTypeMask() & Mesh::geom_type);
+      return (Mesh*)geometries[i].ptr; 
     }
 
     template<typename Mesh>
     __forceinline Mesh* getSafe(size_t i) {
       assert(i < geometries.size());
-      if (geometries[i] == nullptr) return nullptr;
-      if (geometries[i]->getType() != Mesh::geom_type) return nullptr;
-      else return (Mesh*) geometries[i];
+      if (geometries[i] == null) return nullptr;
+      if (!(geometries[i]->getTypeMask() & Mesh::geom_type)) return nullptr;
+      else return (Mesh*) geometries[i].ptr;
     }
 
-    __forceinline Geometry* get_locked(size_t i)  {
+    __forceinline Ref<Geometry> get_locked(size_t i)  {
       Lock<SpinLock> lock(geometriesMutex);
-      Geometry *g = geometries[i]; 
       assert(i < geometries.size()); 
-      return g; 
+      return geometries[i]; 
     }
 
-    /* test if this is a static scene */
-    __forceinline bool isStatic() const { return embree::isStatic(flags); }
-
-    /* test if this is a dynamic scene */
-    __forceinline bool isDynamic() const { return embree::isDynamic(flags); }
-
-    __forceinline bool isCompact() const { return embree::isCompact(flags); }
-    __forceinline bool isCoherent() const { return embree::isCoherent(flags); }
-    __forceinline bool isRobust() const { return embree::isRobust(flags); }
-    __forceinline bool isHighQuality() const { return embree::isHighQuality(flags); }
-    __forceinline bool isInterpolatable() const { return embree::isInterpolatable(aflags); }
-    __forceinline bool isStreamMode() const { return embree::isStreamMode(aflags); }
-
-    __forceinline bool isExclusiveIntersect1Mode() const { 
-      if (!isIntersect1Mode(aflags)) return false;
-      if (isIntersect4Mode(aflags))  return false;
-      if (isIntersect8Mode(aflags))  return false;
-      if (isIntersect16Mode(aflags)) return false;
-      return true;
-    }
-
-    /* test if scene got already build */
-    __forceinline bool isBuild() const { return is_build; }
-
-  public:
-    IDPool<unsigned> id_pool;
-    std::vector<Geometry*> geometries; //!< list of all user geometries
+    /* flag decoding */
+    __forceinline bool isFastAccel() const { return !isCompactAccel() && !isRobustAccel(); }
+    __forceinline bool isCompactAccel() const { return scene_flags & RTC_SCENE_FLAG_COMPACT; }
+    __forceinline bool isRobustAccel()  const { return scene_flags & RTC_SCENE_FLAG_ROBUST; }
+    __forceinline bool isStaticAccel()  const { return !(scene_flags & RTC_SCENE_FLAG_DYNAMIC); }
+    __forceinline bool isDynamicAccel() const { return scene_flags & RTC_SCENE_FLAG_DYNAMIC; }
     
+    __forceinline bool hasArgumentFilterFunction() const {
+      return scene_flags & RTC_SCENE_FLAG_FILTER_FUNCTION_IN_ARGUMENTS;
+    }
+    
+    __forceinline bool hasGeometryFilterFunction() {
+      return world.numFilterFunctions != 0;
+    }
+      
+    __forceinline bool hasFilterFunction() {
+      return hasArgumentFilterFunction() || hasGeometryFilterFunction();
+    }
+    
+    void* createQBVH6Accel();
+
   public:
     Device* device;
-    AccelN accels;
-    std::atomic<size_t> commitCounterSubdiv;
-    std::atomic<size_t> numMappedBuffers;         //!< number of mapped buffers
-    RTCSceneFlags flags;
-    RTCAlgorithmFlags aflags;
-    bool needTriangleIndices; 
-    bool needTriangleVertices; 
-    bool needQuadIndices; 
-    bool needQuadVertices; 
-    bool needBezierIndices;
-    bool needBezierVertices;
-    bool needLineIndices;
-    bool needLineVertices;
-    bool needSubdivIndices;
-    bool needSubdivVertices;
+
+  public:
+    IDPool<unsigned,0xFFFFFFFE> id_pool;
+    Device::vector<Ref<Geometry>> geometries = device; //!< list of all user geometries
+    avector<unsigned int> geometryModCounters_;
+    Device::vector<float*> vertices = device;
+    
+  public:
+    /* these are to detect if we need to recreate the acceleration structures */
+    bool flags_modified;
+    unsigned int enabled_geometry_types;
+    
+    RTCSceneFlags scene_flags;
+    RTCBuildQuality quality_flags;
     MutexSys buildMutex;
     SpinLock geometriesMutex;
-    bool is_build;
-    bool modified;                   //!< true if scene got modified
-    
-    /*! global lock step task scheduler */
-#if defined(TASKING_INTERNAL) 
-    MutexSys schedulerMutex;
-    Ref<TaskScheduler> scheduler;
-#elif defined(TASKING_TBB)
-    tbb::task_group* group;
-    BarrierActiveAutoReset group_barrier;
-#elif defined(TASKING_PPL)
-    concurrency::task_group* group;
-    BarrierActiveAutoReset group_barrier;
+
+#if defined(EMBREE_SYCL_SUPPORT)
+  public:
+    BBox3f hwaccel_bounds = empty;
+    AccelBuffer hwaccel;
 #endif
+    
+  private:
+    bool modified;                   //!< true if scene got modified
+
+  public:
+
+    std::unique_ptr<TaskGroup> taskGroup;
     
   public:
     struct BuildProgressMonitorInterface : public BuildProgressMonitor {
@@ -336,43 +310,74 @@ namespace isa
       Scene* scene;
     };
     BuildProgressMonitorInterface progressInterface;
-    RTCProgressMonitorFunc progress_monitor_function;
+    RTCProgressMonitorFunction progress_monitor_function;
     void* progress_monitor_ptr;
     std::atomic<size_t> progress_monitor_counter;
     void progressMonitor(double nprims);
-    void setProgressMonitorFunction(RTCProgressMonitorFunc func, void* ptr);
+    void setProgressMonitorFunction(RTCProgressMonitorFunction func, void* ptr);
+
+  private:
+    GeometryCounts world;               //!< counts for geometry
 
   public:
-    struct GeometryCounts 
-    {
-      __forceinline GeometryCounts()
-        : numTriangles(0), numQuads(0), numBezierCurves(0), numLineSegments(0), numSubdivPatches(0), numUserGeometries(0) {}
-
-      __forceinline size_t size() const {
-        return numTriangles + numQuads + numBezierCurves + numLineSegments + numSubdivPatches + numUserGeometries;
-      }
-
-      std::atomic<size_t> numTriangles;             //!< number of enabled triangles
-      std::atomic<size_t> numQuads;                 //!< number of enabled quads
-      std::atomic<size_t> numBezierCurves;          //!< number of enabled curves
-      std::atomic<size_t> numLineSegments;          //!< number of enabled line segments
-      std::atomic<size_t> numSubdivPatches;         //!< number of enabled subdivision patches
-      std::atomic<size_t> numUserGeometries;        //!< number of enabled user geometries
-    };
-    
-    GeometryCounts world;               //!< counts for non-motion blurred geometry
-    GeometryCounts worldMB;             //!< counts for motion blurred geometry
-    GeometryCounts instanced;           //!< instance counts for non-motion blurred geometry
-    GeometryCounts instancedMB;         //!< instance counts for motion blurred geometry
-
-    std::atomic<size_t> numSubdivEnableDisableEvents; //!< number of enable/disable calls for any subdiv geometry
 
     __forceinline size_t numPrimitives() const {
-      return world.size() + worldMB.size();
+      return world.size();
     }
 
-    template<typename Mesh, bool mblur> __forceinline size_t getNumPrimitives() const;
+    __forceinline size_t getNumPrimitives(Geometry::GTypeMask mask, bool mblur) const
+    {
+      size_t count = 0;
+      
+      if (mask & Geometry::MTY_TRIANGLE_MESH)
+        count += mblur ? world.numMBTriangles : world.numTriangles;
+      
+      if (mask & Geometry::MTY_QUAD_MESH)
+        count += mblur ? world.numMBQuads : world.numQuads;
+      
+      if (mask & Geometry::MTY_CURVE2)
+        count += mblur ? world.numMBLineSegments : world.numLineSegments;
+      
+      if (mask & Geometry::MTY_CURVE4)
+        count += mblur ? world.numMBBezierCurves : world.numBezierCurves;
+      
+      if (mask & Geometry::MTY_POINTS)
+        count += mblur ? world.numMBPoints : world.numPoints;
+      
+      if (mask & Geometry::MTY_SUBDIV_MESH)
+        count += mblur ? world.numMBSubdivPatches : world.numSubdivPatches;
+      
+      if (mask & Geometry::MTY_USER_GEOMETRY)
+        count += mblur ? world.numMBUserGeometries : world.numUserGeometries;
+      
+      if (mask & Geometry::MTY_INSTANCE_CHEAP)
+        count += mblur ? world.numMBInstancesCheap : world.numInstancesCheap;
+      
+      if (mask & Geometry::MTY_INSTANCE_EXPENSIVE)
+        count += mblur  ? world.numMBInstancesExpensive : world.numInstancesExpensive;
+      
+      if (mask & Geometry::MTY_GRID_MESH)
+        count += mblur  ? world.numMBGrids : world.numGrids;
 
+      if (mask & Geometry::MTY_LOSSY_COMPRESSED_GEOMETRY)
+        count += world.numLossyCompressedGeometries;
+      
+      return count;
+    }
+
+    __forceinline size_t getNumSubPrimitives(Geometry::GTypeMask mask, bool mblur) const
+    {
+      size_t count = 0;
+      
+      if (mask & Geometry::MTY_GRID_MESH)
+        count += mblur  ? world.numMBSubGrids : world.numSubGrids;
+
+      Geometry::GTypeMask new_mask = (Geometry::GTypeMask)(mask & ~Geometry::MTY_GRID_MESH);
+      count += getNumPrimitives(new_mask, mblur);
+      
+      return count;
+    }
+    
     template<typename Mesh, bool mblur>
     __forceinline unsigned getNumTimeSteps()
     {
@@ -382,56 +387,12 @@ namespace isa
       Scene::Iterator<Mesh,mblur> iter(this);
       return iter.maxTimeStepsPerGeometry();
     }
-   
-    std::atomic<size_t> numIntersectionFilters1;   //!< number of enabled intersection/occlusion filters for single rays
-    std::atomic<size_t> numIntersectionFilters4;   //!< number of enabled intersection/occlusion filters for 4-wide ray packets
-    std::atomic<size_t> numIntersectionFilters8;   //!< number of enabled intersection/occlusion filters for 8-wide ray packets
-    std::atomic<size_t> numIntersectionFilters16;  //!< number of enabled intersection/occlusion filters for 16-wide ray packets
-    std::atomic<size_t> numIntersectionFiltersN;   //!< number of enabled intersection/occlusion filters for N-wide ray packets
 
- public:
-    virtual DeviceInterface* getDevice();
-    virtual GeometryInterface* getGeometry(unsigned geomID);
-    virtual GeometryInterface* getGeometryLocked(unsigned geomID);
-    virtual void rtcGetBounds(RTCBounds& bounds_o);
-    virtual void rtcGetLinearBounds(RTCBounds* bounds_o);
-    virtual void rtcIntersect (RTCRay& ray);
-    virtual void rtcIntersect1Ex (const RTCIntersectContext* user_context, RTCRay& ray);
-    virtual void rtcIntersect4 (const void* valid, RTCRay4& ray);
-    virtual void rtcIntersect4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray);
-    virtual void rtcIntersect8 (const void* valid, RTCRay8& ray);
-    virtual void rtcIntersect8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray);
-    virtual void rtcIntersect16 (const void* valid, RTCRay16& ray);
-    virtual void rtcIntersect16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray);
-    virtual void rtcIntersect1M (const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride);
-    virtual void rtcIntersect1Mp (const RTCIntersectContext* user_context, RTCRay** rays, const size_t M);
-    virtual void rtcIntersectNM (const RTCIntersectContext* user_context, struct RTCRayN* rays, const size_t N, const size_t M, const size_t stride);
-    virtual void rtcIntersectNp (const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N);
-    virtual void rtcOccluded (RTCRay& ray);
-    virtual void rtcOccluded1Ex (const RTCIntersectContext* user_context, RTCRay& ray);
-    virtual void rtcOccluded4 (const void* valid, RTCRay4& ray);
-    virtual void rtcOccluded4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray);
-    virtual void rtcOccluded8 (const void* valid, RTCRay8& ray);
-    virtual void rtcOccluded8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray);
-    virtual void rtcOccluded16 (const void* valid, RTCRay16& ray);
-    virtual void rtcOccluded16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray);
-    virtual void rtcOccluded1M(const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride);
-    virtual void rtcOccluded1Mp(const RTCIntersectContext* user_context, RTCRay** rays, const size_t M);
-    virtual void rtcOccludedNM(const RTCIntersectContext* user_context, RTCRayN* rays, const size_t N, const size_t M, const size_t stride);
-    virtual void rtcOccludedNp(const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N);
+    template<typename Mesh, bool mblur>
+    __forceinline unsigned int getMaxGeomID()
+    {
+      Scene::Iterator<Mesh,mblur> iter(this);
+      return iter.maxGeomID();
+    }
   };
-
-  template<> __forceinline size_t Scene::getNumPrimitives<TriangleMesh,false>() const { return world.numTriangles; }
-  template<> __forceinline size_t Scene::getNumPrimitives<TriangleMesh,true>() const { return worldMB.numTriangles; }
-  template<> __forceinline size_t Scene::getNumPrimitives<QuadMesh,false>() const { return world.numQuads; }
-  template<> __forceinline size_t Scene::getNumPrimitives<QuadMesh,true>() const { return worldMB.numQuads; }
-  template<> __forceinline size_t Scene::getNumPrimitives<NativeCurves,false>() const { return world.numBezierCurves; }
-  template<> __forceinline size_t Scene::getNumPrimitives<NativeCurves,true>() const { return worldMB.numBezierCurves; }
-  template<> __forceinline size_t Scene::getNumPrimitives<LineSegments,false>() const { return world.numLineSegments; }
-  template<> __forceinline size_t Scene::getNumPrimitives<LineSegments,true>() const { return worldMB.numLineSegments; }
-  template<> __forceinline size_t Scene::getNumPrimitives<SubdivMesh,false>() const { return world.numSubdivPatches; }
-  template<> __forceinline size_t Scene::getNumPrimitives<SubdivMesh,true>() const { return worldMB.numSubdivPatches; }
-  template<> __forceinline size_t Scene::getNumPrimitives<AccelSet,false>() const { return world.numUserGeometries; }
-  template<> __forceinline size_t Scene::getNumPrimitives<AccelSet,true>() const { return worldMB.numUserGeometries; }
-}
 }

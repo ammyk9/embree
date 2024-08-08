@@ -4,8 +4,19 @@
 #pragma once
 
 #include "../math/vec.h"
+#include "sobol_matrices.h"
 
 namespace embree {
+
+__forceinline float safe_sample(float sample) {
+  return min(sample, 1.f-(float)ulp);
+}
+
+__forceinline float to_float_unorm(uint32_t x)
+{
+  return float(x) * 2.3283064365386962890625e-10f; // x / 2^32
+}
+  
 
 struct RandomSampler
 {
@@ -41,6 +52,16 @@ __forceinline unsigned int MurmurHash3_finalize(unsigned int hash)
 
   return hash;
 }
+
+__forceinline unsigned int hashToRandom(unsigned int value, unsigned int scramble)
+{
+  value = (value ^ 61) ^ scramble;
+  value += value << 3;
+  value ^= value >> 4;
+  value *= 0x27d4eb2d;
+  return value;
+}
+  
 
 __forceinline unsigned int LCG_next(unsigned int value)
 {
@@ -110,5 +131,121 @@ __forceinline Vec3fa RandomSampler_get3D(RandomSampler& self)
   const int w = RandomSampler_getUInt(self);
   return Vec3fa(srl(Vec3ia(u,v,w), 1)) * 4.656612873077392578125e-10f;
 }
+
+
+class PCGSampler
+{
+public:
+
+  __forceinline void InitSampler(unsigned x, unsigned y, unsigned sampleID, unsigned dim = 0)
+  {
+    unsigned pixelID = x | (y << 16);
+    this->state = 0;
+    this->stream = (sampleID << 1u) | 1u;
+
+    // hash seed to reduce correlation artefacts
+    this->state = MurmurHash3_mix(this->state, pixelID);
+    this->state = MurmurHash3_finalize(this->state);
+
+    RandomSampler__pcg32();
+    this->state += pixelID;
+    RandomSampler__pcg32();
+  }
+
+  __forceinline float Get1D() 
+  {
+    return GetFloat();
+  }
+
+  __forceinline Vec2f Get2D()
+  {
+  const float u = Get1D();
+  const float v = Get1D();
+  return Vec2f(u,v);
+  }
+
+  __forceinline float Get1D_uniform()
+  {
+    return Get1D();
+  }
+  
+  __forceinline Vec2f Get2D_uniform()
+  {
+    return Get2D();
+  }
+
+  __forceinline Vec2f GetPixel2D()
+  {
+    return Get2D();
+  }
+
+private:
+
+  __forceinline unsigned RandomSampler__pcg32()
+  {
+    unsigned long oldstate = this->state;
+    this->state = oldstate * 6364136223846793005ULL + (this->stream | 1u);
+    unsigned xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+    unsigned rot = oldstate >> 59u;
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+
+  __forceinline float GetFloat() 
+  {
+    return safe_sample((float)(RandomSampler__pcg32() >> 1)
+        * 4.656612873077392578125e-10f);
+  }
+
+  unsigned long state;
+  unsigned long stream;
+};
+
+class SobolSampler
+{
+public:
+
+  __forceinline void InitSampler(unsigned pixelID, unsigned sampleID, unsigned dim)
+  {
+    // skip the first few samples to reduce correlation artifacts
+    this->index = sampleID + 64;
+
+    unsigned hash = 0;
+    hash = MurmurHash3_mix(hash, pixelID);
+    this->scramble = MurmurHash3_finalize(hash);
+
+    hash = MurmurHash3_mix(hash, sampleID);
+    this->dimension = dim;
+  }
+
+  __forceinline float Get1D() {
+    return GetFloat();
+  }
+
+  __forceinline Vec2f Get2D()
+  {
+    const float u = Get1D();
+    const float v = Get1D();
+    return Vec2f(u,v);
+  }
+
+private:
+
+  __forceinline float GetFloat()
+  {
+    // MAXIMUM 1024 dimensions!!!
+
+    // Sample the Sobol sequence
+    const float s = Sobol_sample(index, dimension);
+
+    // Apply Cranley-Patterson rotation to reduce correlation artifacts
+    const float shift = to_float_unorm(hashToRandom(dimension, scramble));
+    dimension++;
+    return safe_sample(CranleyPattersonRotation(s, shift));
+  }
+
+  unsigned index; // sample index
+  unsigned scramble; // random number for scrambling the samples
+  unsigned dimension;
+};  
 
 } // namespace embree

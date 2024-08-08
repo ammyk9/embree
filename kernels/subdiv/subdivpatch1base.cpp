@@ -19,7 +19,7 @@ namespace isa
   : flags(0), type(INVALID_PATCH), geom(gID), prim(pID), time_(unsigned(time))
   {
     static_assert(sizeof(SubdivPatch1Base) == 5 * 64, "SubdivPatch1Base has wrong size");
-
+    
     const HalfEdge* edge = mesh->getHalfEdge(0,pID);
 
     if (edge->patch_type == HalfEdge::BILINEAR_PATCH)
@@ -29,7 +29,7 @@ namespace isa
     }
     else if (edge->patch_type == HalfEdge::REGULAR_QUAD_PATCH) 
     {
-#if PATCH_USE_BEZIER_PATCH 
+#if PATCH_USE_BEZIER_PATCH
       type = BEZIER_PATCH;
       new (patch_v) BezierPatch3fa(BSplinePatch3fa(CatmullClarkPatch3fa(edge,mesh->getVertexBuffer(time))));
 #else

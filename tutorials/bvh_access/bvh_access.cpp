@@ -1,50 +1,31 @@
-// ======================================================================== //
-// Copyright 2009-2017 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2021 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #include "../common/tutorial/tutorial.h"
 #include "../common/tutorial/tutorial_device.h"
-#include "../../include/embree2/rtcore.h"
+#include "../../include/embree4/rtcore.h"
+RTC_NAMESPACE_USE
 #include "../../kernels/bvh/bvh.h"
 #include "../../kernels/geometry/trianglev.h"
 
 namespace embree
 {
-namespace isa
-{
-  /* Visual Studio 2012 link error workaround */
-  PrecomputedBezierBasis bezier_basis0;
-  PrecomputedBezierBasis bezier_basis1;
-  PrecomputedBSplineBasis bspline_basis0;
-  PrecomputedBSplineBasis bspline_basis1;
-
   /* error reporting function */
   void error_handler(void* userPtr, const RTCError code, const char* str)
   {
-    if (code == RTC_NO_ERROR) 
+    if (code == RTC_ERROR_NONE) 
       return;
     
     printf("Embree: ");
     switch (code) {
-    case RTC_UNKNOWN_ERROR    : printf("RTC_UNKNOWN_ERROR"); break;
-    case RTC_INVALID_ARGUMENT : printf("RTC_INVALID_ARGUMENT"); break;
-    case RTC_INVALID_OPERATION: printf("RTC_INVALID_OPERATION"); break;
-    case RTC_OUT_OF_MEMORY    : printf("RTC_OUT_OF_MEMORY"); break;
-    case RTC_UNSUPPORTED_CPU  : printf("RTC_UNSUPPORTED_CPU"); break;
-    case RTC_CANCELLED        : printf("RTC_CANCELLED"); break;
-    default                   : printf("invalid error code"); break;
+    case RTC_ERROR_UNKNOWN          : printf("RTC_ERROR_UNKNOWN"); break;
+    case RTC_ERROR_INVALID_ARGUMENT : printf("RTC_ERROR_INVALID_ARGUMENT"); break;
+    case RTC_ERROR_INVALID_OPERATION: printf("RTC_ERROR_INVALID_OPERATION"); break;
+    case RTC_ERROR_OUT_OF_MEMORY    : printf("RTC_ERROR_OUT_OF_MEMORY"); break;
+    case RTC_ERROR_UNSUPPORTED_CPU  : printf("RTC_ERROR_UNSUPPORTED_CPU"); break;
+    case RTC_ERROR_CANCELLED        : printf("RTC_ERROR_CANCELLED"); break;
+    case RTC_ERROR_UNSUPPORTED_GPU  : printf("RTC_ERROR_UNSUPPORTED_GPU"); break;
+    default                         : printf("invalid error code"); break;
     }
     if (str) { 
       printf(" ("); 
@@ -55,13 +36,13 @@ namespace isa
   }
 
   /* adds a cube to the scene */
-  unsigned int addCube (RTCScene scene_i, const Vec3fa& pos)
+  unsigned int addCube (RTCDevice device_i, RTCScene scene_i, const Vec3fa& pos)
   {
     /* create a triangulated cube with 12 triangles and 8 vertices */
-    unsigned int mesh = rtcNewTriangleMesh (scene_i, RTC_GEOMETRY_STATIC, 12, 8);
+    RTCGeometry mesh = rtcNewGeometry (device_i, RTC_GEOMETRY_TYPE_TRIANGLE);
     
     /* set vertices */
-    Vec3fa* vertices = (Vec3fa*) rtcMapBuffer(scene_i,mesh,RTC_VERTEX_BUFFER); 
+    Vec3fa* vertices = (Vec3fa*) rtcSetNewGeometryBuffer(mesh, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(Vec3fa), 8); 
     vertices[0].x = pos.x + -1; vertices[0].y = pos.y + -1; vertices[0].z = pos.z + -1; 
     vertices[1].x = pos.x + -1; vertices[1].y = pos.y + -1; vertices[1].z = pos.z + +1; 
     vertices[2].x = pos.x + -1; vertices[2].y = pos.y + +1; vertices[2].z = pos.z + -1; 
@@ -70,11 +51,10 @@ namespace isa
     vertices[5].x = pos.x + +1; vertices[5].y = pos.y + -1; vertices[5].z = pos.z + +1; 
     vertices[6].x = pos.x + +1; vertices[6].y = pos.y + +1; vertices[6].z = pos.z + -1; 
     vertices[7].x = pos.x + +1; vertices[7].y = pos.y + +1; vertices[7].z = pos.z + +1; 
-    rtcUnmapBuffer(scene_i,mesh,RTC_VERTEX_BUFFER); 
     
     /* set triangles */
     int tri = 0;
-    Triangle* triangles = (Triangle*) rtcMapBuffer(scene_i,mesh,RTC_INDEX_BUFFER);
+    Triangle* triangles = (Triangle*) rtcSetNewGeometryBuffer(mesh, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(Triangle), 12);
     
     // left side
     triangles[tri].v0 = 0; triangles[tri].v1 = 2; triangles[tri].v2 = 1; tri++;
@@ -99,62 +79,65 @@ namespace isa
     // back side
     triangles[tri].v0 = 1; triangles[tri].v1 = 3; triangles[tri].v2 = 5; tri++;
     triangles[tri].v0 = 3; triangles[tri].v1 = 7; triangles[tri].v2 = 5; tri++;
-    
-    rtcUnmapBuffer(scene_i,mesh,RTC_INDEX_BUFFER);
-    
-    return mesh;
+
+    rtcCommitGeometry(mesh);
+    unsigned int geomID = rtcAttachGeometry(scene_i,mesh);
+    rtcReleaseGeometry(mesh);
+    return geomID;
   }
 
   /* adds a ground plane to the scene */
-  unsigned int addGroundPlane (RTCScene scene_i)
+  unsigned int addGroundPlane (RTCDevice device_i, RTCScene scene_i)
   {
     /* create a triangulated plane with 2 triangles and 4 vertices */
-    unsigned int mesh = rtcNewTriangleMesh (scene_i, RTC_GEOMETRY_STATIC, 2, 4);
+    RTCGeometry mesh = rtcNewGeometry (device_i, RTC_GEOMETRY_TYPE_TRIANGLE);
     
     /* set vertices */
-    Vec3fa* vertices = (Vec3fa*) rtcMapBuffer(scene_i,mesh,RTC_VERTEX_BUFFER); 
+    Vec3fa* vertices = (Vec3fa*) rtcSetNewGeometryBuffer(mesh, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(Vec3fa), 4); 
     vertices[0].x = -10; vertices[0].y = -2; vertices[0].z = -10; 
     vertices[1].x = -10; vertices[1].y = -2; vertices[1].z = +10; 
     vertices[2].x = +10; vertices[2].y = -2; vertices[2].z = -10; 
     vertices[3].x = +10; vertices[3].y = -2; vertices[3].z = +10;
-    rtcUnmapBuffer(scene_i,mesh,RTC_VERTEX_BUFFER); 
     
     /* set triangles */
-    Triangle* triangles = (Triangle*) rtcMapBuffer(scene_i,mesh,RTC_INDEX_BUFFER);
+    Triangle* triangles = (Triangle*) rtcSetNewGeometryBuffer(mesh, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(Triangle), 2);
     triangles[0].v0 = 0; triangles[0].v1 = 2; triangles[0].v2 = 1;
     triangles[1].v0 = 1; triangles[1].v1 = 2; triangles[1].v2 = 3;
-    rtcUnmapBuffer(scene_i,mesh,RTC_INDEX_BUFFER);
-    
-    return mesh;
+
+    rtcCommitGeometry(mesh);
+    unsigned int geomID = rtcAttachGeometry(scene_i,mesh);
+    rtcReleaseGeometry(mesh);
+    return geomID;
   }
 
   /* adds a hair to the scene */
-  unsigned int addHair(RTCScene scene_i)
+  unsigned int addHair(RTCDevice device_i, RTCScene scene_i)
   {
-    unsigned int geomID = rtcNewBezierHairGeometry (scene_i, RTC_GEOMETRY_STATIC, 1, 4, 1);
+    RTCGeometry geom = rtcNewGeometry (device_i, RTC_GEOMETRY_TYPE_ROUND_BEZIER_CURVE);
 
-    vfloat4* pos = (vfloat4*) rtcMapBuffer(scene_i,geomID,RTC_VERTEX_BUFFER);
+    vfloat4* pos = (vfloat4*) rtcSetNewGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT4, sizeof(vfloat4), 4);
     pos[0] = vfloat4(0.0f,0.0f,0.0f,0.1f);
     pos[1] = vfloat4(0.0f,1.0f,0.0f,0.1f);
     pos[2] = vfloat4(0.0f,2.0f,0.0f,0.1f);
     pos[3] = vfloat4(0.0f,3.0f,0.0f,0.1f);
-    rtcUnmapBuffer(scene_i,geomID,RTC_VERTEX_BUFFER);
 
-    int* index = (int*) rtcMapBuffer(scene_i,geomID,RTC_INDEX_BUFFER);
+    int* index = (int*) rtcSetNewGeometryBuffer(geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT, sizeof(int), 1);
     index[0] = 0;
-    rtcUnmapBuffer(scene_i,geomID,RTC_INDEX_BUFFER);
-    
+
+    rtcCommitGeometry(geom);
+    unsigned int geomID = rtcAttachGeometry(scene_i,geom);
+    rtcReleaseGeometry(geom);
     return geomID;
   }
 
   /* prints the bvh4.triangle4v data structure */
   void print_bvh4_triangle4v(BVH4::NodeRef node, size_t depth)
   {
-    if (node.isAlignedNode())
+    if (node.isAABBNode())
     {
-      BVH4::AlignedNode* n = node.alignedNode();
+      BVH4::AABBNode* n = node.getAABBNode();
       
-      std::cout << "AlignedNode {" << std::endl;
+      std::cout << "AABBNode {" << std::endl;
       for (size_t i=0; i<4; i++)
       {
         for (size_t k=0; k<depth; k++) std::cout << "  ";
@@ -210,7 +193,7 @@ namespace isa
       for (size_t i=0; i<accelN->accels.size(); i++) {
         if (accelN->accels[i]->intersectors.ptr->type == AccelData::TY_BVH4) {
           bvh4 = (BVH4*)accelN->accels[i]->intersectors.ptr;
-          if (bvh4->primTy.name == "triangle4v") break;
+          if (std::string(bvh4->primTy->name()) == "triangle4v") break;
           bvh4 = nullptr;
         }
       }
@@ -231,35 +214,38 @@ namespace isa
 
     /* create new Embree device and force bvh4.triangle4v hierarchy for triangles */
     RTCDevice device = rtcNewDevice("tri_accel=bvh4.triangle4v");
-    error_handler(nullptr,rtcDeviceGetError(device),nullptr);
+    error_handler(nullptr,rtcGetDeviceError(device));
     
     /* set error handler */
-    rtcDeviceSetErrorFunction2(device,error_handler,nullptr);
+    rtcSetDeviceErrorFunction(device,error_handler,nullptr);
     
     /* create scene */
-    RTCScene scene = rtcDeviceNewScene(device,RTC_SCENE_STATIC,RTC_INTERSECT1);
-    addCube(scene,Vec3fa(-1,0,0));
-    addCube(scene,Vec3fa(1,0,0));
-    addCube(scene,Vec3fa(0,0,-1));
-    addCube(scene,Vec3fa(0,0,1));
-    addHair(scene);
-    addGroundPlane(scene);
-    rtcCommit (scene);
+    RTCScene scene = rtcNewScene(device);
+    addCube(device,scene,Vec3fa(-1,0,0));
+    addCube(device,scene,Vec3fa(1,0,0));
+    addCube(device,scene,Vec3fa(0,0,-1));
+    addCube(device,scene,Vec3fa(0,0,1));
+    addHair(device,scene);
+    addGroundPlane(device,scene);
+    rtcCommitScene (scene);
     /* print triangle BVH */
     print_bvh(scene);
 
     /* cleanup */
-    rtcDeleteScene (scene);
-    rtcDeleteDevice(device);
+    rtcReleaseScene (scene);
+    rtcReleaseDevice(device);
+
+    /* wait for user input under Windows when opened in separate window */
+    waitForKeyPressedUnderWindows();
+    
     return 0;
   }
-}
 }
 
 int main(int argc, char** argv)
 {
   try {
-    return embree::isa::main(argc, argv);
+    return embree::main(argc, argv);
   }
   catch (const std::exception& e) {
     std::cout << "Error: " << e.what() << std::endl;

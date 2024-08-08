@@ -1854,3 +1854,8 @@ export void device_cleanup ()
   g_accu_height = 0;
   g_accu_count = 0;
 } // device_cleanup
+
+export void device_gui ()
+{
+}
+

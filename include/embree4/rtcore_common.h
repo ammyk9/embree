@@ -175,6 +175,16 @@ struct RTC_ALIGN(16) RTCLinearBounds
   struct RTCBounds bounds1;
 };
 
+#define RTC_LOSSY_COMPRESSED_GRID_QUAD_RES 8
+#define RTC_LOSSY_COMPRESSED_GRID_VERTEX_RES (RTC_LOSSY_COMPRESSED_GRID_QUAD_RES+1)
+#define RTC_LOSSY_COMPRESSED_GRID_QUAD_RES 8
+#define RTC_LOSSY_COMPRESSED_GRID_LOCAL_ID_SHIFT (6+1)
+
+struct RTCLossyCompressedGrid
+{
+  float vertex[RTC_LOSSY_COMPRESSED_GRID_VERTEX_RES][RTC_LOSSY_COMPRESSED_GRID_VERTEX_RES][3];
+};
+
 /* Feature flags for SYCL specialization constants */
 enum RTCFeatureFlags
 {

@@ -1969,4 +1969,8 @@ extern "C" void device_cleanup ()
   g_accu_count = 0;
 } // device_cleanup
 
+extern "C" void device_gui()
+{
+}
+
 } // namespace embree

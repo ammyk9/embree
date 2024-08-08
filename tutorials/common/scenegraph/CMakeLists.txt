@@ -7,13 +7,11 @@ ADD_LIBRARY(scenegraph STATIC
     xml_writer.cpp
     obj_loader.cpp
     ply_loader.cpp
-#    rtas_loader.cpp
-#    RTASFile.cpp
-#    RTASToEmbree.cpp    
     corona_loader.cpp
     texture.cpp
     scenegraph.cpp
-    geometry_creation.cpp)
+    geometry_creation.cpp
+    ../tutorial/noise.cpp)
 
 TARGET_LINK_LIBRARIES(scenegraph sys math lexers image embree)
 SET_PROPERTY(TARGET scenegraph PROPERTY FOLDER tutorials/common)

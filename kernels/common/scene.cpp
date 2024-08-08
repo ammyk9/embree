@@ -1,966 +1,990 @@
-// ======================================================================== //
-// Copyright 2009-2017 Intel Corporation                                    //
-//                                                                          //
-// Licensed under the Apache License, Version 2.0 (the "License");          //
-// you may not use this file except in compliance with the License.         //
-// You may obtain a copy of the License at                                  //
-//                                                                          //
-//     http://www.apache.org/licenses/LICENSE-2.0                           //
-//                                                                          //
-// Unless required by applicable law or agreed to in writing, software      //
-// distributed under the License is distributed on an "AS IS" BASIS,        //
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
-// See the License for the specific language governing permissions and      //
-// limitations under the License.                                           //
-// ======================================================================== //
+// Copyright 2009-2021 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 
 #include "scene.h"
-#include "../../include/embree2/rtcore_ray.h"
+
+#include "../../common/tasking/taskscheduler.h"
 
 #include "../bvh/bvh4_factory.h"
 #include "../bvh/bvh8_factory.h"
- 
+
+#include "../../common/algorithms/parallel_reduce.h"
+
+#if defined(EMBREE_SYCL_SUPPORT)
+#  include "../sycl/rthwif_embree_builder.h"
+
+#include "../sycl/rthwif_embree.h"
+#include "../rthwif/rttrace/rttrace.h"
+
+#endif
+
 namespace embree
 {
-namespace isa
-{
-  /* error raising rtcIntersect and rtcOccluded functions */
-  void missing_rtcCommit()      { throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed"); }
-  void invalid_rtcIntersect1()  { throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect and rtcOccluded not enabled"); }
-  void invalid_rtcIntersect4()  { throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect4 and rtcOccluded4 not enabled"); }
-  void invalid_rtcIntersect8()  { throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect8 and rtcOccluded8 not enabled"); }
-  void invalid_rtcIntersect16() { throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect16 and rtcOccluded16 not enabled"); }
-  void invalid_rtcIntersectN()  { throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersectN and rtcOccludedN not enabled"); }
 
-  Scene::Scene (Device* device, RTCSceneFlags sflags, RTCAlgorithmFlags aflags)
-    : Accel(AccelData::TY_UNKNOWN),
-      device(device), 
-      commitCounterSubdiv(0), 
-      numMappedBuffers(0),
-      flags(sflags), aflags(aflags), 
-      needTriangleIndices(false), needTriangleVertices(false), 
-      needQuadIndices(false), needQuadVertices(false), 
-      needBezierIndices(false), needBezierVertices(false),
-      needLineIndices(false), needLineVertices(false),
-      needSubdivIndices(false), needSubdivVertices(false),
-      is_build(false), modified(true),
-      progressInterface(this), progress_monitor_function(nullptr), progress_monitor_ptr(nullptr), progress_monitor_counter(0), 
-      numIntersectionFilters1(0), numIntersectionFilters4(0), numIntersectionFilters8(0), numIntersectionFilters16(0), numIntersectionFiltersN(0)
-  {
-#if defined(TASKING_INTERNAL) 
-    scheduler = nullptr;
+  struct TaskGroup {
+    /*! global lock step task scheduler */
+#if defined(TASKING_INTERNAL)
+    MutexSys schedulerMutex;
+    Ref<TaskScheduler> scheduler;
+#elif defined(TASKING_TBB) && TASKING_TBB_USE_TASK_ISOLATION
+    tbb::isolated_task_group group;
 #elif defined(TASKING_TBB)
-    group = new tbb::task_group;
+    tbb::task_group group;
 #elif defined(TASKING_PPL)
-    group = new concurrency::task_group;
+    concurrency::task_group group;
 #endif
+  };
+
+  /* error raising rtcIntersect and rtcOccluded functions */
+  void missing_rtcCommit()      { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed"); }
+  void invalid_rtcIntersect1()  { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcIntersect and rtcOccluded not enabled"); }
+  void invalid_rtcIntersect4()  { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcIntersect4 and rtcOccluded4 not enabled"); }
+  void invalid_rtcIntersect8()  { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcIntersect8 and rtcOccluded8 not enabled"); }
+  void invalid_rtcIntersect16() { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcIntersect16 and rtcOccluded16 not enabled"); }
+  void invalid_rtcIntersectN()  { throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcIntersectN and rtcOccludedN not enabled"); }
+
+  Scene::Scene (Device* device)
+    : device(device),
+      flags_modified(true), enabled_geometry_types(0),
+      scene_flags(RTC_SCENE_FLAG_NONE),
+      quality_flags(RTC_BUILD_QUALITY_MEDIUM),
+      modified(true),
+      taskGroup(new TaskGroup()),
+      progressInterface(this), progress_monitor_function(nullptr), progress_monitor_ptr(nullptr), progress_monitor_counter(0)
+  {
+    device->refInc();
 
     intersectors = Accel::Intersectors(missing_rtcCommit);
 
+    /* use proper device and context for SYCL allocations */
+#if defined(EMBREE_SYCL_SUPPORT)
+    if (DeviceGPU* gpu_device = dynamic_cast<DeviceGPU*>(device))
+      hwaccel = AccelBuffer(AccelAllocator<char>(gpu_device->getGPUDevice(),gpu_device->getGPUContext()),0);
+#endif
+  
+    /* one can overwrite flags through device for debugging */
+    if (device->quality_flags != -1)
+      quality_flags = (RTCBuildQuality) device->quality_flags;
     if (device->scene_flags != -1)
-      flags = (RTCSceneFlags) device->scene_flags;
+      scene_flags = (RTCSceneFlags) device->scene_flags;
+  }
 
-    if (aflags & RTC_INTERPOLATE) {
-      needTriangleIndices = true;
-      needQuadIndices = true;
-      needBezierIndices = true;
-      needLineIndices = true;
-      //needSubdivIndices = true; // not required for interpolation
-      needTriangleVertices = true;
-      needQuadVertices = true;      
-      needBezierVertices = true;
-      needLineVertices = true;
-      needSubdivVertices = true;
+  Scene::~Scene() noexcept
+  {
+    device->refDec();
+  }
+  
+  void Scene::printStatistics()
+  {
+    /* calculate maximum number of time segments */
+    unsigned max_time_steps = 0;
+    for (size_t i=0; i<size(); i++) {
+      if (!get(i)) continue;
+      max_time_steps = max(max_time_steps,get(i)->numTimeSteps);
     }
 
-    createTriangleAccel();
-    createTriangleMBAccel();
-    createQuadAccel();
-    createQuadMBAccel();
-    createSubdivAccel();
-    createSubdivMBAccel();
-    createHairAccel();
-    createHairMBAccel();
-    createLineAccel();
-    createLineMBAccel();
+    /* initialize vectors*/
+    std::vector<size_t> statistics[Geometry::GTY_END];
+    for (size_t i=0; i<Geometry::GTY_END; i++)
+      statistics[i].resize(max_time_steps);
 
-#if defined(EMBREE_GEOMETRY_TRIANGLES)
-    accels.add(device->bvh4_factory->BVH4InstancedBVH4Triangle4ObjectSplit(this));
-#endif
+    /* gather statistics */
+    for (size_t i=0; i<size(); i++) 
+    {
+      if (!get(i)) continue;
+      int ty = get(i)->getType(); 
+      assert(ty<Geometry::GTY_END);
+      int timesegments = get(i)->numTimeSegments(); 
+      assert((unsigned int)timesegments < max_time_steps);
+      statistics[ty][timesegments] += get(i)->size();
+    }
 
-    // has to be the last as the instID field of a hit instance is not invalidated by other hit geometry
-    createUserGeometryAccel();
-    createUserGeometryMBAccel();
+    /* print statistics */
+    std::cout << std::setw(23) << "segments" << ": ";
+    for (size_t t=0; t<max_time_steps; t++)
+      std::cout << std::setw(10) << t;
+    std::cout << std::endl;
+
+    std::cout << "-------------------------";
+    for (size_t t=0; t<max_time_steps; t++)
+      std::cout << "----------";
+    std::cout << std::endl;
+    
+    for (size_t p=0; p<Geometry::GTY_END; p++)
+    {
+      if (std::string(Geometry::gtype_names[p]) == "") continue;
+      std::cout << std::setw(23) << Geometry::gtype_names[p] << ": ";
+      for (size_t t=0; t<max_time_steps; t++)
+        std::cout << std::setw(10) << statistics[p][t];
+      std::cout << std::endl;
+    }
   }
 
   void Scene::createTriangleAccel()
   {
-#if defined(EMBREE_GEOMETRY_TRIANGLES)
+#if defined(EMBREE_GEOMETRY_TRIANGLE)
+
     if (device->tri_accel == "default") 
     {
-      if (isStatic()) {
-        int mode =  2*(int)isCompact() + 1*(int)isRobust(); 
+      if (quality_flags != RTC_BUILD_QUALITY_LOW)
+      {	
+        int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel(); 
         switch (mode) {
         case /*0b00*/ 0: 
-#if defined (__AVX__)
-          if (device->hasISA(AVX))
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX())
 	  {
-            if (isHighQuality()) 
-              accels.add(device->bvh8_factory->BVH8Triangle4(this,BVH8Factory::BuildVariant::HIGH_QUALITY,BVH8Factory::IntersectVariant::FAST)); 
+            if (quality_flags == RTC_BUILD_QUALITY_HIGH) 
+              accels_add(device->bvh8_factory->BVH8Triangle4(this,BVHFactory::BuildVariant::HIGH_QUALITY,BVHFactory::IntersectVariant::FAST));
             else
-              accels.add(device->bvh8_factory->BVH8Triangle4(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::FAST));
+              accels_add(device->bvh8_factory->BVH8Triangle4(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
           }
           else 
 #endif
           { 
-            if (isHighQuality()) 
-              accels.add(device->bvh4_factory->BVH4Triangle4(this,BVH4Factory::BuildVariant::HIGH_QUALITY,BVH4Factory::IntersectVariant::FAST));
+            if (quality_flags == RTC_BUILD_QUALITY_HIGH) 
+              accels_add(device->bvh4_factory->BVH4Triangle4(this,BVHFactory::BuildVariant::HIGH_QUALITY,BVHFactory::IntersectVariant::FAST));
             else 
-              accels.add(device->bvh4_factory->BVH4Triangle4(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST));
+              accels_add(device->bvh4_factory->BVH4Triangle4(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
           }
           break;
 
         case /*0b01*/ 1: 
-#if defined (__AVX__)
-          if (device->hasISA(AVX)) 
-            accels.add(device->bvh8_factory->BVH8Triangle4v(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::ROBUST)); 
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX()) 
+            accels_add(device->bvh8_factory->BVH8Triangle4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
           else
 #endif
-            accels.add(device->bvh4_factory->BVH4Triangle4v(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); 
+            accels_add(device->bvh4_factory->BVH4Triangle4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
 
           break;
-        case /*0b10*/ 2: 
-#if defined (__AVX__)
-          if (device->hasISA(AVX)) 
-            accels.add(device->bvh8_factory->BVH8Triangle4i(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::FAST  )); 
-          else
-#endif
-            accels.add(device->bvh4_factory->BVH4Triangle4i(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST  )); 
-          break;
-        case /*0b11*/ 3: 
-#if defined (__AVX__)
-          if (device->hasISA(AVX)) 
-            accels.add(device->bvh8_factory->BVH8Triangle4i(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::ROBUST)); 
-          else
-#endif
-            accels.add(device->bvh4_factory->BVH4Triangle4i(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); 
-          break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
       else /* dynamic */
       {
-#if defined (__AVX__)
-          if (device->hasISA(AVX))
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX())
 	  {
-            int mode =  2*(int)isCompact() + 1*(int)isRobust();
+            int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel();
             switch (mode) {
-            case /*0b00*/ 0: accels.add(device->bvh8_factory->BVH8Triangle4 (this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::FAST  )); break;
-            case /*0b01*/ 1: accels.add(device->bvh8_factory->BVH8Triangle4v(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::ROBUST)); break; 
-            case /*0b10*/ 2: accels.add(device->bvh8_factory->BVH8Triangle4i(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::FAST  )); break;
-            case /*0b11*/ 3: accels.add(device->bvh8_factory->BVH8Triangle4i(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::ROBUST)); break;
+            case /*0b00*/ 0: accels_add(device->bvh8_factory->BVH8Triangle4 (this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST  )); break;
+            case /*0b01*/ 1: accels_add(device->bvh8_factory->BVH8Triangle4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
+            case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST  )); break;
+            case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
             }
           }
           else
 #endif
           {
-            int mode =  2*(int)isCompact() + 1*(int)isRobust();
+            int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel();
             switch (mode) {
-            case /*0b00*/ 0: accels.add(device->bvh4_factory->BVH4Triangle4 (this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::FAST  )); break;
-            case /*0b01*/ 1: accels.add(device->bvh4_factory->BVH4Triangle4v(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::ROBUST)); break;
-            case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Triangle4i(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::FAST  )); break;
-            case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Triangle4i(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+            case /*0b00*/ 0: accels_add(device->bvh4_factory->BVH4Triangle4 (this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST  )); break;
+            case /*0b01*/ 1: accels_add(device->bvh4_factory->BVH4Triangle4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
+            case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST  )); break;
+            case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Triangle4i(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
             }
           }
       }
     }
-    else if (device->tri_accel == "bvh4.triangle4")       accels.add(device->bvh4_factory->BVH4Triangle4 (this));
-    else if (device->tri_accel == "bvh4.triangle4v")      accels.add(device->bvh4_factory->BVH4Triangle4v(this));
-    else if (device->tri_accel == "bvh4.triangle4i")      accels.add(device->bvh4_factory->BVH4Triangle4i(this));
-    else if (device->tri_accel == "qbvh4.triangle4i")     accels.add(device->bvh4_factory->BVH4QuantizedTriangle4i(this));
+    else if (device->tri_accel == "bvh4.triangle4")       accels_add(device->bvh4_factory->BVH4Triangle4 (this));
+    else if (device->tri_accel == "bvh4.triangle4v")      accels_add(device->bvh4_factory->BVH4Triangle4v(this));
+    else if (device->tri_accel == "bvh4.triangle4i")      accels_add(device->bvh4_factory->BVH4Triangle4i(this));
+    else if (device->tri_accel == "qbvh4.triangle4i")     accels_add(device->bvh4_factory->BVH4QuantizedTriangle4i(this));
 
-#if defined (__AVX__)
-    else if (device->tri_accel == "bvh8.triangle4")       accels.add(device->bvh8_factory->BVH8Triangle4 (this));
-    else if (device->tri_accel == "bvh8.triangle4i")      accels.add(device->bvh8_factory->BVH8Triangle4i(this));
-    else if (device->tri_accel == "qbvh8.triangle4i")     accels.add(device->bvh8_factory->BVH8QuantizedTriangle4i(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->tri_accel == "bvh8.triangle4")       accels_add(device->bvh8_factory->BVH8Triangle4 (this));
+    else if (device->tri_accel == "bvh8.triangle4v")      accels_add(device->bvh8_factory->BVH8Triangle4v(this));
+    else if (device->tri_accel == "bvh8.triangle4i")      accels_add(device->bvh8_factory->BVH8Triangle4i(this));
+    else if (device->tri_accel == "qbvh8.triangle4i")     accels_add(device->bvh8_factory->BVH8QuantizedTriangle4i(this));
+    else if (device->tri_accel == "qbvh8.triangle4")      accels_add(device->bvh8_factory->BVH8QuantizedTriangle4(this));
 #endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown triangle acceleration structure "+device->tri_accel);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown triangle acceleration structure "+device->tri_accel);
 #endif
+
   }
 
   void Scene::createTriangleMBAccel()
   {
-#if defined(EMBREE_GEOMETRY_TRIANGLES)
+#if defined(EMBREE_GEOMETRY_TRIANGLE)
+
     if (device->tri_accel_mb == "default")
     {
-      int mode =  2*(int)isCompact() + 1*(int)isRobust(); 
+      int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel(); 
       
-#if defined (__AVX__)
-      if (device->hasISA(AVX2)) // BVH8 reduces performance on AVX only-machines
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX2()) // BVH8 reduces performance on AVX only-machines
       {
         switch (mode) {
-        case /*0b00*/ 0: accels.add(device->bvh8_factory->BVH8Triangle4iMB(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::FAST  )); break;
-        case /*0b01*/ 1: accels.add(device->bvh8_factory->BVH8Triangle4iMB(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::ROBUST)); break;
-        case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST  )); break;
-        case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+        case /*0b00*/ 0: accels_add(device->bvh8_factory->BVH8Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+        case /*0b01*/ 1: accels_add(device->bvh8_factory->BVH8Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
       else
 #endif
       {
         switch (mode) {
-        case /*0b00*/ 0: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST  )); break;
-        case /*0b01*/ 1: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); break;
-        case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST  )); break;
-        case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Triangle4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+        case /*0b00*/ 0: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+        case /*0b01*/ 1: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Triangle4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
     }
-    else if (device->tri_accel_mb == "bvh4.triangle4vmb") accels.add(device->bvh4_factory->BVH4Triangle4vMB(this));
-    else if (device->tri_accel_mb == "bvh4.triangle4imb") accels.add(device->bvh4_factory->BVH4Triangle4iMB(this));
-#if defined (__AVX__)
-    else if (device->tri_accel_mb == "bvh8.triangle4vmb") accels.add(device->bvh8_factory->BVH8Triangle4vMB(this));
-    else if (device->tri_accel_mb == "bvh8.triangle4imb") accels.add(device->bvh8_factory->BVH8Triangle4iMB(this));
+    else if (device->tri_accel_mb == "bvh4.triangle4imb") accels_add(device->bvh4_factory->BVH4Triangle4iMB(this));
+    else if (device->tri_accel_mb == "bvh4.triangle4vmb") accels_add(device->bvh4_factory->BVH4Triangle4vMB(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->tri_accel_mb == "bvh8.triangle4imb") accels_add(device->bvh8_factory->BVH8Triangle4iMB(this));
+    else if (device->tri_accel_mb == "bvh8.triangle4vmb") accels_add(device->bvh8_factory->BVH8Triangle4vMB(this));
 #endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown motion blur triangle acceleration structure "+device->tri_accel_mb);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown motion blur triangle acceleration structure "+device->tri_accel_mb);
 #endif
   }
 
   void Scene::createQuadAccel()
   {
-#if defined(EMBREE_GEOMETRY_QUADS)
+#if defined(EMBREE_GEOMETRY_QUAD)
+    
     if (device->quad_accel == "default") 
     {
-      if (isStatic())
+      if (quality_flags != RTC_BUILD_QUALITY_LOW)
       {
         /* static */
-        int mode =  2*(int)isCompact() + 1*(int)isRobust(); 
+        int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel(); 
         switch (mode) {
         case /*0b00*/ 0:
-#if defined (__AVX__)
-          if (device->hasISA(AVX))
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX())
           {
-            if (isHighQuality()) 
-              accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::HIGH_QUALITY,BVH8Factory::IntersectVariant::FAST));
+            if (quality_flags == RTC_BUILD_QUALITY_HIGH) 
+              accels_add(device->bvh8_factory->BVH8Quad4v(this,BVHFactory::BuildVariant::HIGH_QUALITY,BVHFactory::IntersectVariant::FAST));
             else
-              accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::FAST));
+              accels_add(device->bvh8_factory->BVH8Quad4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
           }
           else
 #endif
           {
-            if (isHighQuality()) 
-              accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::HIGH_QUALITY,BVH4Factory::IntersectVariant::FAST));
+            if (quality_flags == RTC_BUILD_QUALITY_HIGH) 
+              accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::HIGH_QUALITY,BVHFactory::IntersectVariant::FAST));
             else
-              accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST));
+              accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
           }
           break;
 
         case /*0b01*/ 1:
-#if defined (__AVX__)
-          if (device->hasISA(AVX))
-            accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::ROBUST));
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX())
+            accels_add(device->bvh8_factory->BVH8Quad4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
           else
 #endif
-            accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST));
+            accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
           break;
 
-        case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Quad4i(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST)); break;
-        case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Quad4i(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Quad4i(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST)); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Quad4i(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
       else /* dynamic */
       {
-#if defined (__AVX__)
-          if (device->hasISA(AVX))
+#if defined (EMBREE_TARGET_SIMD8)
+          if (device->canUseAVX())
 	  {
-            int mode =  2*(int)isCompact() + 1*(int)isRobust();
+            int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel();
             switch (mode) {
-            case /*0b00*/ 0: accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::FAST)); break;
-            case /*0b01*/ 1: accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::ROBUST)); break; 
-            case /*0b10*/ 2: accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::FAST)); break;
-            case /*0b11*/ 3: accels.add(device->bvh8_factory->BVH8Quad4v(this,BVH8Factory::BuildVariant::DYNAMIC,BVH8Factory::IntersectVariant::ROBUST)); break;
+            case /*0b00*/ 0: accels_add(device->bvh8_factory->BVH8Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST)); break;
+            case /*0b01*/ 1: accels_add(device->bvh8_factory->BVH8Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
+            case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST)); break;
+            case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
             }
           }
           else
 #endif
           {
-            int mode =  2*(int)isCompact() + 1*(int)isRobust();
+            int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel();
             switch (mode) {
-            case /*0b00*/ 0: accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::FAST)); break;
-            case /*0b01*/ 1: accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::ROBUST)); break; 
-            case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::FAST)); break;
-            case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Quad4v(this,BVH4Factory::BuildVariant::DYNAMIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+            case /*0b00*/ 0: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST)); break;
+            case /*0b01*/ 1: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
+            case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::FAST)); break;
+            case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Quad4v(this,BVHFactory::BuildVariant::DYNAMIC,BVHFactory::IntersectVariant::ROBUST)); break;
             }
           }
       }
     }
-    else if (device->quad_accel == "bvh4.quad4v")       accels.add(device->bvh4_factory->BVH4Quad4v(this));
-    else if (device->quad_accel == "bvh4.quad4i")       accels.add(device->bvh4_factory->BVH4Quad4i(this));
-    else if (device->quad_accel == "qbvh4.quad4i")      accels.add(device->bvh4_factory->BVH4QuantizedQuad4i(this));
+    else if (device->quad_accel == "bvh4.quad4v")       accels_add(device->bvh4_factory->BVH4Quad4v(this));
+    else if (device->quad_accel == "bvh4.quad4i")       accels_add(device->bvh4_factory->BVH4Quad4i(this));
+    else if (device->quad_accel == "qbvh4.quad4i")      accels_add(device->bvh4_factory->BVH4QuantizedQuad4i(this));
 
-#if defined (__AVX__)
-    else if (device->quad_accel == "bvh8.quad4v")       accels.add(device->bvh8_factory->BVH8Quad4v(this));
-    else if (device->quad_accel == "bvh8.quad4i")       accels.add(device->bvh8_factory->BVH8Quad4i(this));
-    else if (device->quad_accel == "qbvh8.quad4i")      accels.add(device->bvh8_factory->BVH8QuantizedQuad4i(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->quad_accel == "bvh8.quad4v")       accels_add(device->bvh8_factory->BVH8Quad4v(this));
+    else if (device->quad_accel == "bvh8.quad4i")       accels_add(device->bvh8_factory->BVH8Quad4i(this));
+    else if (device->quad_accel == "qbvh8.quad4i")      accels_add(device->bvh8_factory->BVH8QuantizedQuad4i(this));
 #endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown quad acceleration structure "+device->quad_accel);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown quad acceleration structure "+device->quad_accel);
 #endif
   }
 
   void Scene::createQuadMBAccel()
   {
-#if defined(EMBREE_GEOMETRY_QUADS)
+#if defined(EMBREE_GEOMETRY_QUAD)
+
     if (device->quad_accel_mb == "default") 
     {
-      int mode =  2*(int)isCompact() + 1*(int)isRobust(); 
+      int mode =  2*(int)isCompactAccel() + 1*(int)isRobustAccel(); 
       switch (mode) {
       case /*0b00*/ 0:
-#if defined (__AVX__)
-        if (device->hasISA(AVX))
-          accels.add(device->bvh8_factory->BVH8Quad4iMB(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::FAST));
+#if defined (EMBREE_TARGET_SIMD8)
+        if (device->canUseAVX())
+          accels_add(device->bvh8_factory->BVH8Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
         else
 #endif
-          accels.add(device->bvh4_factory->BVH4Quad4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST));
+          accels_add(device->bvh4_factory->BVH4Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST));
         break;
 
       case /*0b01*/ 1:
-#if defined (__AVX__)
-        if (device->hasISA(AVX))
-          accels.add(device->bvh8_factory->BVH8Quad4iMB(this,BVH8Factory::BuildVariant::STATIC,BVH8Factory::IntersectVariant::ROBUST));
+#if defined (EMBREE_TARGET_SIMD8)
+        if (device->canUseAVX())
+          accels_add(device->bvh8_factory->BVH8Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
         else
 #endif
-          accels.add(device->bvh4_factory->BVH4Quad4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST));
+          accels_add(device->bvh4_factory->BVH4Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST));
         break;
 
-      case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Quad4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::FAST  )); break;
-      case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Quad4iMB(this,BVH4Factory::BuildVariant::STATIC,BVH4Factory::IntersectVariant::ROBUST)); break;
+      case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::FAST  )); break;
+      case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4Quad4iMB(this,BVHFactory::BuildVariant::STATIC,BVHFactory::IntersectVariant::ROBUST)); break;
       }
     }
-    else if (device->quad_accel_mb == "bvh4.quad4imb") accels.add(device->bvh4_factory->BVH4Quad4iMB(this));
-#if defined (__AVX__)
-    else if (device->quad_accel_mb == "bvh8.quad4imb") accels.add(device->bvh8_factory->BVH8Quad4iMB(this));
+    else if (device->quad_accel_mb == "bvh4.quad4imb") accels_add(device->bvh4_factory->BVH4Quad4iMB(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->quad_accel_mb == "bvh8.quad4imb") accels_add(device->bvh8_factory->BVH8Quad4iMB(this));
 #endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown quad acceleration structure "+device->quad_accel_mb);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown quad motion blur acceleration structure "+device->quad_accel_mb);
 #endif
   }
 
   void Scene::createHairAccel()
   {
-#if defined(EMBREE_GEOMETRY_HAIR)
+#if defined(EMBREE_GEOMETRY_CURVE) || defined(EMBREE_GEOMETRY_POINT)
+
     if (device->hair_accel == "default")
     {
-      int mode = 2*(int)isCompact() + 1*(int)isRobust();
-      if (isStatic())
+      int mode = 2*(int)isCompactAccel() + 1*(int)isRobustAccel();
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX2()) // only enable on HSW machines, for SNB this codepath is slower
       {
-#if defined (__AVX__)
-        if (device->hasISA(AVX2)) // only enable on HSW machines, for SNB this codepath is slower
-        {
-          switch (mode) {
-          case /*0b00*/ 0: accels.add(device->bvh8_factory->BVH8OBBBezier1v(this)); break;
-          case /*0b01*/ 1: accels.add(device->bvh8_factory->BVH8OBBBezier1v(this)); break;
-          case /*0b10*/ 2: accels.add(device->bvh8_factory->BVH8OBBBezier1i(this)); break;
-          case /*0b11*/ 3: accels.add(device->bvh8_factory->BVH8OBBBezier1i(this)); break;
-          }
-        }
-        else
-#endif
-        {
-          switch (mode) {
-          case /*0b00*/ 0: accels.add(device->bvh4_factory->BVH4OBBBezier1v(this)); break;
-          case /*0b01*/ 1: accels.add(device->bvh4_factory->BVH4OBBBezier1v(this)); break;
-          case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4OBBBezier1i(this)); break;
-          case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4OBBBezier1i(this)); break;
-          }
+        switch (mode) {
+        case /*0b00*/ 0: accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8v(this,BVHFactory::IntersectVariant::FAST)); break;
+        case /*0b01*/ 1: accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8v(this,BVHFactory::IntersectVariant::ROBUST)); break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve8i(this,BVHFactory::IntersectVariant::FAST)); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve8i(this,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
       else
+#endif
       {
         switch (mode) {
-        case /*0b00*/ 0: accels.add(device->bvh4_factory->BVH4Bezier1v(this)); break;
-        case /*0b01*/ 1: accels.add(device->bvh4_factory->BVH4Bezier1v(this)); break;
-        case /*0b10*/ 2: accels.add(device->bvh4_factory->BVH4Bezier1i(this)); break;
-        case /*0b11*/ 3: accels.add(device->bvh4_factory->BVH4Bezier1i(this)); break;
+        case /*0b00*/ 0: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4v(this,BVHFactory::IntersectVariant::FAST)); break;
+        case /*0b01*/ 1: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4v(this,BVHFactory::IntersectVariant::ROBUST)); break;
+        case /*0b10*/ 2: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4i(this,BVHFactory::IntersectVariant::FAST)); break;
+        case /*0b11*/ 3: accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4i(this,BVHFactory::IntersectVariant::ROBUST)); break;
         }
       }
     }
-    else if (device->hair_accel == "bvh4.bezier1v"    ) accels.add(device->bvh4_factory->BVH4Bezier1v(this));
-    else if (device->hair_accel == "bvh4.bezier1i"    ) accels.add(device->bvh4_factory->BVH4Bezier1i(this));
-    else if (device->hair_accel == "bvh4obb.bezier1v" ) accels.add(device->bvh4_factory->BVH4OBBBezier1v(this));
-    else if (device->hair_accel == "bvh4obb.bezier1i" ) accels.add(device->bvh4_factory->BVH4OBBBezier1i(this));
-#if defined (__AVX__)
-    else if (device->hair_accel == "bvh8obb.bezier1v" ) accels.add(device->bvh8_factory->BVH8OBBBezier1v(this));
-    else if (device->hair_accel == "bvh8obb.bezier1i" ) accels.add(device->bvh8_factory->BVH8OBBBezier1i(this));
+    else if (device->hair_accel == "bvh4obb.virtualcurve4v" ) accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4v(this,BVHFactory::IntersectVariant::FAST));
+    else if (device->hair_accel == "bvh4obb.virtualcurve4i" ) accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4i(this,BVHFactory::IntersectVariant::FAST));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->hair_accel == "bvh8obb.virtualcurve8v" ) accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8v(this,BVHFactory::IntersectVariant::FAST));
+    else if (device->hair_accel == "bvh4obb.virtualcurve8i" ) accels_add(device->bvh4_factory->BVH4OBBVirtualCurve8i(this,BVHFactory::IntersectVariant::FAST));
 #endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown hair acceleration structure "+device->hair_accel);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown hair acceleration structure "+device->hair_accel);
 #endif
   }
 
   void Scene::createHairMBAccel()
   {
-#if defined(EMBREE_GEOMETRY_HAIR)
+#if defined(EMBREE_GEOMETRY_CURVE) || defined(EMBREE_GEOMETRY_POINT)
+
     if (device->hair_accel_mb == "default")
     {
-#if defined (__AVX__)
-      if (device->hasISA(AVX2)) // only enable on HSW machines, on SNB this codepath is slower
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX2()) // only enable on HSW machines, on SNB this codepath is slower
       {
-        accels.add(device->bvh8_factory->BVH8OBBBezier1iMB(this));
+        if (isRobustAccel()) accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8iMB(this,BVHFactory::IntersectVariant::ROBUST));
+        else                 accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8iMB(this,BVHFactory::IntersectVariant::FAST));
       }
       else
 #endif
       {
-        accels.add(device->bvh4_factory->BVH4OBBBezier1iMB(this));
+        if (isRobustAccel()) accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4iMB(this,BVHFactory::IntersectVariant::ROBUST));
+        else                 accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4iMB(this,BVHFactory::IntersectVariant::FAST));
       }
     }
-    else if (device->hair_accel_mb == "bvh4obb.bezier1imb") accels.add(device->bvh4_factory->BVH4OBBBezier1iMB(this));
-#if defined (__AVX__)
-    else if (device->hair_accel_mb == "bvh8obb.bezier1imb") accels.add(device->bvh8_factory->BVH8OBBBezier1iMB(this));
-#endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown motion blur hair acceleration structure "+device->tri_accel_mb);
-#endif
-  }
+    else if (device->hair_accel_mb == "bvh4.virtualcurve4imb") accels_add(device->bvh4_factory->BVH4OBBVirtualCurve4iMB(this,BVHFactory::IntersectVariant::FAST));
 
-  void Scene::createLineAccel()
-  {
-#if defined(EMBREE_GEOMETRY_LINES)
-    if (device->line_accel == "default")
-    {
-      if (isStatic())
-      {
-#if defined (__AVX__)
-        if (device->hasISA(AVX) && !isCompact())
-          accels.add(device->bvh8_factory->BVH8Line4i(this));
-        else
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->hair_accel_mb == "bvh4.virtualcurve8imb") accels_add(device->bvh4_factory->BVH4OBBVirtualCurve8iMB(this,BVHFactory::IntersectVariant::FAST));
+    else if (device->hair_accel_mb == "bvh8.virtualcurve8imb") accels_add(device->bvh8_factory->BVH8OBBVirtualCurve8iMB(this,BVHFactory::IntersectVariant::FAST));
 #endif
-          accels.add(device->bvh4_factory->BVH4Line4i(this,BVH4Factory::BuildVariant::STATIC));
-      }
-      else
-      {
-        accels.add(device->bvh4_factory->BVH4Line4i(this,BVH4Factory::BuildVariant::DYNAMIC));
-      }
-    }
-    else if (device->line_accel == "bvh4.line4i") accels.add(device->bvh4_factory->BVH4Line4i(this));
-#if defined (__AVX__)
-    else if (device->line_accel == "bvh8.line4i") accels.add(device->bvh8_factory->BVH8Line4i(this));
-#endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown line segment acceleration structure "+device->line_accel);
-#endif
-  }
-
-  void Scene::createLineMBAccel()
-  {
-#if defined(EMBREE_GEOMETRY_LINES)
-    if (device->line_accel_mb == "default")
-    {
-#if defined (__AVX__)
-      if (device->hasISA(AVX) && !isCompact())
-        accels.add(device->bvh8_factory->BVH8Line4iMB(this));
-      else
-#endif
-        accels.add(device->bvh4_factory->BVH4Line4iMB(this));
-    }
-    else if (device->line_accel_mb == "bvh4.line4imb") accels.add(device->bvh4_factory->BVH4Line4iMB(this));
-#if defined (__AVX__)
-    else if (device->line_accel_mb == "bvh8.line4imb") accels.add(device->bvh8_factory->BVH8Line4iMB(this));
-#endif
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown motion blur line segment acceleration structure "+device->line_accel_mb);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown motion blur hair acceleration structure "+device->hair_accel_mb);
 #endif
   }
 
   void Scene::createSubdivAccel()
   {
-#if defined(EMBREE_GEOMETRY_SUBDIV)
-    if (device->subdiv_accel == "default") 
-    {
-      if (isIncoherent(flags) && isStatic())
-        accels.add(device->bvh4_factory->BVH4SubdivPatch1Eager(this));
-      else
-        accels.add(device->bvh4_factory->BVH4SubdivPatch1(this,true));
+#if defined(EMBREE_GEOMETRY_SUBDIVISION)
+    if (device->subdiv_accel == "default") {
+      accels_add(device->bvh4_factory->BVH4SubdivPatch1(this));
     }
-    else if (device->subdiv_accel == "bvh4.subdivpatch1eager" ) accels.add(device->bvh4_factory->BVH4SubdivPatch1Eager(this));
-    else if (device->subdiv_accel == "bvh4.subdivpatch1"      ) accels.add(device->bvh4_factory->BVH4SubdivPatch1(this,false));
-    else if (device->subdiv_accel == "bvh4.subdivpatch1cached") accels.add(device->bvh4_factory->BVH4SubdivPatch1(this,true));
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown subdiv accel "+device->subdiv_accel);
+    else if (device->subdiv_accel == "bvh4.grid.eager" ) accels_add(device->bvh4_factory->BVH4SubdivPatch1(this));
+    else if (device->subdiv_accel == "bvh4.subdivpatch1eager" ) accels_add(device->bvh4_factory->BVH4SubdivPatch1(this));
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown subdiv accel "+device->subdiv_accel);
 #endif
   }
 
   void Scene::createSubdivMBAccel()
   {
-#if defined(EMBREE_GEOMETRY_SUBDIV)
-    if (device->subdiv_accel_mb == "default") 
-    {
-      if (isIncoherent(flags) && isStatic())
-        accels.add(device->bvh4_factory->BVH4SubdivPatch1MB(this,false));
-      else
-        accels.add(device->bvh4_factory->BVH4SubdivPatch1MB(this,true));
+#if defined(EMBREE_GEOMETRY_SUBDIVISION)
+    if (device->subdiv_accel_mb == "default") {
+      accels_add(device->bvh4_factory->BVH4SubdivPatch1MB(this));
     }
-    else if (device->subdiv_accel_mb == "bvh4.subdivpatch1"      ) accels.add(device->bvh4_factory->BVH4SubdivPatch1MB(this,false));
-    else if (device->subdiv_accel_mb == "bvh4.subdivpatch1cached") accels.add(device->bvh4_factory->BVH4SubdivPatch1MB(this,true));
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown subdiv mblur accel "+device->subdiv_accel_mb);
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown subdiv mblur accel "+device->subdiv_accel_mb);
 #endif
   }
 
   void Scene::createUserGeometryAccel()
   {
 #if defined(EMBREE_GEOMETRY_USER)
-    if (device->object_accel == "default") 
+
+    if (device->object_accel == "default")
     {
-      if (isStatic()) {
-        accels.add(device->bvh4_factory->BVH4UserGeometry(this,BVH4Factory::BuildVariant::STATIC));
-      } else {
-        accels.add(device->bvh4_factory->BVH4UserGeometry(this,BVH4Factory::BuildVariant::DYNAMIC));
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel())
+      {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh8_factory->BVH8UserGeometry(this,BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh8_factory->BVH8UserGeometry(this,BVHFactory::BuildVariant::DYNAMIC));
+        }
+      }
+      else
+#endif
+      {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh4_factory->BVH4UserGeometry(this,BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh4_factory->BVH4UserGeometry(this,BVHFactory::BuildVariant::DYNAMIC));
+        }
       }
     }
-    else if (device->object_accel == "bvh4.object") accels.add(device->bvh4_factory->BVH4UserGeometry(this)); 
-    else throw_RTCError(RTC_INVALID_ARGUMENT,"unknown user geometry accel "+device->object_accel);
+    else if (device->object_accel == "bvh4.object") accels_add(device->bvh4_factory->BVH4UserGeometry(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->object_accel == "bvh8.object") accels_add(device->bvh8_factory->BVH8UserGeometry(this));
+#endif
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown user geometry accel "+device->object_accel);
 #endif
   }
 
   void Scene::createUserGeometryMBAccel()
   {
 #if defined(EMBREE_GEOMETRY_USER)
-    accels.add(device->bvh4_factory->BVH4UserGeometryMB(this));
+
+    if (device->object_accel_mb == "default"    ) {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel())
+        accels_add(device->bvh8_factory->BVH8UserGeometryMB(this));
+      else
+#endif
+        accels_add(device->bvh4_factory->BVH4UserGeometryMB(this));
+    }
+    else if (device->object_accel_mb == "bvh4.object") accels_add(device->bvh4_factory->BVH4UserGeometryMB(this));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->object_accel_mb == "bvh8.object") accels_add(device->bvh8_factory->BVH8UserGeometryMB(this));
+#endif
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown user geometry mblur accel "+device->object_accel_mb);
 #endif
   }
-  
-  Scene::~Scene () 
-  {
-    for (size_t i=0; i<geometries.size(); i++)
-      delete geometries[i];
 
-#if defined(TASKING_TBB) || defined(TASKING_PPL)
-    delete group; group = nullptr;
+  void Scene::createInstanceAccel()
+  {
+#if defined(EMBREE_GEOMETRY_INSTANCE)
+
+    // if (device->object_accel == "default") 
+    {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel()) {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh8_factory->BVH8Instance(this, false, BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh8_factory->BVH8Instance(this, false, BVHFactory::BuildVariant::DYNAMIC));
+        }
+      } 
+      else
 #endif
+      {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh4_factory->BVH4Instance(this, false, BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh4_factory->BVH4Instance(this, false, BVHFactory::BuildVariant::DYNAMIC));
+        }
+      }
+    }
+    // else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown instance accel "+device->instance_accel);
+#endif
+  }
+
+  void Scene::createInstanceMBAccel()
+  {
+#if defined(EMBREE_GEOMETRY_INSTANCE)
+
+    //if (device->instance_accel_mb == "default")
+    {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel())
+        accels_add(device->bvh8_factory->BVH8InstanceMB(this, false));
+      else
+#endif
+        accels_add(device->bvh4_factory->BVH4InstanceMB(this, false));
+    }
+    //else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown instance mblur accel "+device->instance_accel_mb);
+#endif
+  }
+
+  void Scene::createInstanceExpensiveAccel()
+  {
+#if defined(EMBREE_GEOMETRY_INSTANCE)
+    // if (device->object_accel == "default") 
+    {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel()) {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh8_factory->BVH8Instance(this, true, BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh8_factory->BVH8Instance(this, true, BVHFactory::BuildVariant::DYNAMIC));
+        }
+      } 
+      else
+#endif
+      {
+        if (quality_flags != RTC_BUILD_QUALITY_LOW) {
+          accels_add(device->bvh4_factory->BVH4Instance(this, true, BVHFactory::BuildVariant::STATIC));
+        } else {
+          accels_add(device->bvh4_factory->BVH4Instance(this, true, BVHFactory::BuildVariant::DYNAMIC));
+        }
+      }
+    }
+    // else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown instance accel "+device->instance_accel);
+#endif
+  }
+
+  void Scene::createInstanceExpensiveMBAccel()
+  {
+#if defined(EMBREE_GEOMETRY_INSTANCE)
+    //if (device->instance_accel_mb == "default")
+    {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel())
+        accels_add(device->bvh8_factory->BVH8InstanceMB(this, true));
+      else
+#endif
+        accels_add(device->bvh4_factory->BVH4InstanceMB(this, true));
+    }
+    //else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown instance mblur accel "+device->instance_accel_mb);
+#endif
+  }
+
+  void Scene::createGridAccel()
+  {
+#if defined(EMBREE_GEOMETRY_GRID)
+    
+    BVHFactory::IntersectVariant ivariant = isRobustAccel() ? BVHFactory::IntersectVariant::ROBUST : BVHFactory::IntersectVariant::FAST;
+
+    if (device->grid_accel == "default") 
+    {
+#if defined (EMBREE_TARGET_SIMD8)
+      if (device->canUseAVX() && !isCompactAccel())
+      {
+        accels_add(device->bvh8_factory->BVH8Grid(this,BVHFactory::BuildVariant::STATIC,ivariant));
+      }
+      else
+#endif
+      {
+        accels_add(device->bvh4_factory->BVH4Grid(this,BVHFactory::BuildVariant::STATIC,ivariant));
+      }
+    }
+    else if (device->grid_accel == "bvh4.grid") accels_add(device->bvh4_factory->BVH4Grid(this,BVHFactory::BuildVariant::STATIC,ivariant));
+#if defined (EMBREE_TARGET_SIMD8)
+    else if (device->grid_accel == "bvh8.grid") accels_add(device->bvh8_factory->BVH8Grid(this,BVHFactory::BuildVariant::STATIC,ivariant));
+#endif
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown grid accel "+device->grid_accel);
+#endif
+
+  }
+
+  void Scene::createGridMBAccel()
+  {
+#if defined(EMBREE_GEOMETRY_GRID)
+
+    if (device->grid_accel_mb == "default") 
+    {
+      accels_add(device->bvh4_factory->BVH4GridMB(this,BVHFactory::BuildVariant::STATIC));
+    }
+    else if (device->grid_accel_mb == "bvh4mb.grid") accels_add(device->bvh4_factory->BVH4GridMB(this));
+    else throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"unknown grid mb accel "+device->grid_accel);
+#endif
+
   }
 
   void Scene::clear() {
   }
 
-  unsigned Scene::newUserGeometry (RTCGeometryFlags gflags, size_t items, size_t numTimeSteps) 
-  {
-#if defined(EMBREE_GEOMETRY_USER)
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-
-    return add(new UserGeometry(this,gflags,items,numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newInstance (SceneInterface* scene, size_t numTimeSteps) 
-  {
-#if defined(EMBREE_GEOMETRY_USER)
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-
-    return add(Instance::create(this,dynamic_cast<Scene*>(scene),numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newGeometryInstance (Geometry* geom_in) 
-  {
-    Geometry* geom = new GeometryInstance(this,geom_in);
-    unsigned id = add(geom);
-    geom->id = id;
-    return id;
-  }
-
-  unsigned Scene::newGeometryInstance (unsigned geomID) {
-    return newGeometryInstance(get_locked(geomID));
-  }
-
-  unsigned int Scene::newGeometryGroup (RTCGeometryFlags gflags, const std::vector<Geometry*> geometries)
-  {
-    Geometry* geom = new GeometryGroup(this,gflags,geometries);
-    unsigned id = add(geom);
-    geom->id = id;
-    return id;
-  }
-
-  unsigned int Scene::newGeometryGroup (RTCGeometryFlags gflags, unsigned* geomIDs, size_t N)
-  {
-    std::vector<Geometry*> geometries(N);
-    for (size_t i=0; i<N; i++) {
-      geometries[i] = get_locked(geomIDs[i]);
-      if (geometries[i]->getType() == Geometry::GROUP)
-        throw_RTCError(RTC_INVALID_ARGUMENT,"geometry groups cannot contain other geometry groups");
-      if (geometries[i]->getType() != geometries[0]->getType())
-        throw_RTCError(RTC_INVALID_ARGUMENT,"geometries inside group have to be of same type");
-    }
-    return newGeometryGroup(gflags,geometries);
-  }
-
-  unsigned Scene::newTriangleMesh (RTCGeometryFlags gflags, size_t numTriangles, size_t numVertices, size_t numTimeSteps) 
-  {
-#if defined(EMBREE_GEOMETRY_TRIANGLES)
-
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-    
-    return add(new TriangleMesh(this,gflags,numTriangles,numVertices,numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newQuadMesh (RTCGeometryFlags gflags, size_t numQuads, size_t numVertices, size_t numTimeSteps) 
-  {
-#if defined(EMBREE_GEOMETRY_QUADS)
-
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-    
-    return add(new QuadMesh(this,gflags,numQuads,numVertices,numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newSubdivisionMesh (RTCGeometryFlags gflags, size_t numFaces, size_t numEdges, size_t numVertices, size_t numEdgeCreases, size_t numVertexCreases, size_t numHoles, size_t numTimeSteps) 
-  {
-#if defined(EMBREE_GEOMETRY_SUBDIV)
-
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-
-#if defined(__AVX__)
-    if (device->hasISA(AVX))
-      return add(new SubdivMeshAVX(this,gflags,numFaces,numEdges,numVertices,numEdgeCreases,numVertexCreases,numHoles,numTimeSteps));
-    else 
-#endif
-      return add(new SubdivMesh(this,gflags,numFaces,numEdges,numVertices,numEdgeCreases,numVertexCreases,numHoles,numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newCurves (int subtype_i, int basis_i, RTCGeometryFlags gflags, size_t numCurves, size_t numVertices, size_t numTimeSteps) 
-  {
-    NativeCurves::SubType subtype = (NativeCurves::SubType) subtype_i;
-    NativeCurves::Basis basis = (NativeCurves::Basis) basis_i;
-    
-#if defined(EMBREE_GEOMETRY_HAIR)
-
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-    
-    Geometry* geom = nullptr;
-#if defined(EMBREE_NATIVE_CURVE_BSPLINE)
-    switch (basis) {
-    case NativeCurves::BEZIER : geom = new CurvesBezier(this,subtype,basis,gflags,numCurves,numVertices,numTimeSteps); break;
-    case NativeCurves::BSPLINE: geom = new NativeCurves(this,subtype,basis,gflags,numCurves,numVertices,numTimeSteps); break;
-    }
-#else
-    switch (basis) {
-    case NativeCurves::BEZIER : geom = new NativeCurves (this,subtype,basis,gflags,numCurves,numVertices,numTimeSteps); break;
-    case NativeCurves::BSPLINE: geom = new CurvesBSpline(this,subtype,basis,gflags,numCurves,numVertices,numTimeSteps); break;
-    }
-#endif
-    return add(geom);
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::newLineSegments (RTCGeometryFlags gflags, size_t numSegments, size_t numVertices, size_t numTimeSteps)
-  {
-#if defined(EMBREE_GEOMETRY_LINES)
-
-    if (isStatic() && (gflags != RTC_GEOMETRY_STATIC)) {
-      throw_RTCError(RTC_INVALID_OPERATION,"static scenes can only contain static geometries");
-      return -1;
-    }
-
-    if (numTimeSteps == 0 || numTimeSteps > RTC_MAX_TIME_STEPS) {
-      throw_RTCError(RTC_INVALID_OPERATION,"maximal number of timesteps exceeded");
-      return -1;
-    }
-
-    return add(new LineSegments(this,gflags,numSegments,numVertices,numTimeSteps));
-#else
-    return -1;
-#endif
-  }
-
-  unsigned Scene::add(Geometry* geometry) 
+  unsigned Scene::bind(unsigned geomID, Ref<Geometry> geometry) 
   {
     Lock<SpinLock> lock(geometriesMutex);
-    unsigned id = id_pool.allocate();
-    if (id >= geometries.size()) 
-      geometries.resize(id+1);
-    geometries[id] = geometry;
-    geometry->id = id;
-    return id;
-  }
-
-  void Scene::deleteGeometry(size_t geomID)
-  {
-    Lock<SpinLock> lock(geometriesMutex);
-    
-    if (isStatic())
-      throw_RTCError(RTC_INVALID_OPERATION,"rtcDeleteGeometry cannot get called in static scenes");
-    if (geomID >= geometries.size())
-      throw_RTCError(RTC_INVALID_OPERATION,"invalid geometry ID");
-
-    Geometry* geometry = geometries[geomID];
-    if (geometry == nullptr)
-      throw_RTCError(RTC_INVALID_OPERATION,"invalid geometry");
-    
-    geometry->disable();
-    accels.deleteGeometry(unsigned(geomID));
-    id_pool.deallocate((unsigned)geomID);
-    geometries[geomID] = nullptr;
-    delete geometry;
-  }
-
-  void Scene::updateInterface()
-  {
-    /* update bounds */
-    is_build = true;
-    bounds = accels.bounds;
-    intersectors = accels.intersectors;
-
-    /* enable only algorithms choosen by application */
-    if ((aflags & RTC_INTERSECT_STREAM) == 0) 
+    if (geomID == RTC_INVALID_GEOMETRY_ID) {
+      geomID = id_pool.allocate();
+      if (geomID == RTC_INVALID_GEOMETRY_ID)
+        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"too many geometries inside scene");
+    }
+    else
     {
-      intersectors.intersectorN = Accel::IntersectorN(&invalid_rtcIntersectN);
-      if ((aflags & RTC_INTERSECT1) == 0) intersectors.intersector1 = Accel::Intersector1(&invalid_rtcIntersect1);
-      if ((aflags & RTC_INTERSECT4) == 0) intersectors.intersector4 = Accel::Intersector4(&invalid_rtcIntersect4);
-      if ((aflags & RTC_INTERSECT8) == 0) intersectors.intersector8 = Accel::Intersector8(&invalid_rtcIntersect8);
-      if ((aflags & RTC_INTERSECT16) == 0) intersectors.intersector16 = Accel::Intersector16(&invalid_rtcIntersect16);
+      if (!id_pool.add(geomID))
+        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"invalid geometry ID provided");
     }
+    if (geomID >= geometries.size()) {
+      geometries.resize(geomID+1);
+      vertices.resize(geomID+1);
+      geometryModCounters_.resize(geomID+1);
+    }
+    geometries[geomID] = geometry;
+    geometryModCounters_[geomID] = 0;
+    if (geometry->isEnabled()) {
+      setModified ();
+    }
+    return geomID;
+  }
+
+  void Scene::detachGeometry(size_t geomID)
+  {
+    Lock<SpinLock> lock(geometriesMutex);
+    
+    if (geomID >= geometries.size())
+      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"invalid geometry ID");
+
+    Ref<Geometry>& geometry = geometries[geomID];
+    if (geometry == null)
+      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"invalid geometry");
+    
+    setModified ();
+    accels_deleteGeometry(unsigned(geomID));
+    id_pool.deallocate((unsigned)geomID);
+    geometries[geomID] = null;
+    vertices[geomID] = nullptr;
+    geometryModCounters_[geomID] = 0;
+  }
+
+  void Scene::build_cpu_accels()
+  {
+    /* select acceleration structures to build */
+    unsigned int new_enabled_geometry_types = world.enabledGeometryTypesMask();
+// #if defined(EMBREE_SYCL_SUPPORT)
+//     if (!dynamic_cast<DeviceGPU*>(device)) // do not build software accel for GPU if not required
+// #endif
+      
+    if (flags_modified || new_enabled_geometry_types != enabled_geometry_types)
+    {
+      accels_init();
+
+      /* we need to make all geometries modified, otherwise two level builder will 
+        not rebuild currently not modified geometries */
+      parallel_for(geometryModCounters_.size(), [&] ( const size_t i ) {
+          geometryModCounters_[i] = 0;
+        });
+
+      if (getNumPrimitives(TriangleMesh::geom_type,false)) createTriangleAccel();
+      if (getNumPrimitives(TriangleMesh::geom_type,true)) createTriangleMBAccel();
+      if (getNumPrimitives(QuadMesh::geom_type,false)) createQuadAccel();
+      if (getNumPrimitives(QuadMesh::geom_type,true)) createQuadMBAccel();
+      if (getNumPrimitives(GridMesh::geom_type,false)) createGridAccel();
+      if (getNumPrimitives(GridMesh::geom_type,true)) createGridMBAccel();
+      if (getNumPrimitives(SubdivMesh::geom_type,false)) createSubdivAccel();
+      if (getNumPrimitives(SubdivMesh::geom_type,true)) createSubdivMBAccel();
+      if (getNumPrimitives(Geometry::MTY_CURVES,false)) createHairAccel();
+      if (getNumPrimitives(Geometry::MTY_CURVES,true)) createHairMBAccel();
+      if (getNumPrimitives(UserGeometry::geom_type,false)) createUserGeometryAccel();
+      if (getNumPrimitives(UserGeometry::geom_type,true)) createUserGeometryMBAccel();      
+      if (getNumPrimitives(Geometry::MTY_INSTANCE_CHEAP,false)) createInstanceAccel();
+      if (getNumPrimitives(Geometry::MTY_INSTANCE_CHEAP,true)) createInstanceMBAccel();
+      if (getNumPrimitives(Geometry::MTY_INSTANCE_EXPENSIVE,false)) createInstanceExpensiveAccel();
+      if (getNumPrimitives(Geometry::MTY_INSTANCE_EXPENSIVE,true)) createInstanceExpensiveMBAccel();
+
+      flags_modified = false;
+      enabled_geometry_types = new_enabled_geometry_types;
+    }
+    
+    /* select fast code path if no filter function is present */
+    accels_select(hasFilterFunction());
+  
+    /* build all hierarchies of this scene */
+    accels_build();
+
+    /* build acceleration structure for rthw */
+// #if defined(EMBREE_SYCL_SUPPORT)
+//     if (DeviceGPU* gpu_device = dynamic_cast<DeviceGPU*>(device))
+//       //if (gpu_device->rthw_support())
+//       //  bounds = LBBox<embree::Vec3fa>(rthwifBuild(this,quality_flags,hwaccel,device->gpu_build));
+//       if (gpu_device->rthw_support()) {
+//         const BBox3f aabb = rthwifBuild(this,quality_flags,hwaccel,device->gpu_build);
+//         bounds = LBBox<embree::Vec3fa>(aabb);
+//         hwaccel_bounds = aabb;
+//       }
+// #endif
+    
+    /* make static geometry immutable */
+    if (!isDynamicAccel()) {
+      accels_immutable();
+      flags_modified = true; // in non-dynamic mode we have to re-create accels
+    }
+
+    if (device->verbosity(2)) {
+      std::cout << "created scene intersector" << std::endl;
+      accels_print(2);
+      std::cout << "selected scene intersector" << std::endl;
+      intersectors.print(2);
+    }
+  }
+
+  void Scene::build_gpu_accels()
+  {
+#if defined(EMBREE_SYCL_SUPPORT)
+    const BBox3f aabb = rthwifBuild(this,hwaccel);
+    bounds = LBBox<embree::Vec3fa>(aabb);
+    hwaccel_bounds = aabb;
+#endif
   }
 
   void Scene::commit_task ()
   {
+    checkIfModifiedAndSet();
+    if (!isModified()) return;
+    
+    /* print scene statistics */
+    if (device->verbosity(2))
+      printStatistics();
+
     progress_monitor_counter = 0;
+    
+    /* gather scene stats and call preCommit function of each geometry */
+    this->world = parallel_reduce (size_t(0), geometries.size(), GeometryCounts (), 
+      [this](const range<size_t>& r)->GeometryCounts
+      {
+        GeometryCounts c;
+        for (auto i=r.begin(); i<r.end(); ++i) 
+        {
+          if (geometries[i] && geometries[i]->isEnabled()) 
+          {
+            geometries[i]->preCommit();
+            geometries[i]->addElementsToCount (c);
+            c.numFilterFunctions += (int) geometries[i]->hasArgumentFilterFunctions();
+            c.numFilterFunctions += (int) geometries[i]->hasGeometryFilterFunctions();
+          }
+        }
+        return c;
+      },
+      std::plus<GeometryCounts>()
+    );
 
-    /* call preCommit function of each geometry */
-    parallel_for(geometries.size(), [&] ( const size_t i ) {
-        if (geometries[i]) geometries[i]->preCommit();
-      });
-
-    /* select fast code path if no intersection filter is present */
-    accels.select(numIntersectionFiltersN+numIntersectionFilters4,
-                  numIntersectionFiltersN+numIntersectionFilters8,
-                  numIntersectionFiltersN+numIntersectionFilters16,
-                  numIntersectionFiltersN);
-  
-    /* build all hierarchies of this scene */
-    accels.build();
-
-    /* make static geometry immutable */
-    if (isStatic()) accels.immutable();
+#if defined(EMBREE_SYCL_SUPPORT)
+    if (DeviceGPU* gpu_device = dynamic_cast<DeviceGPU*>(device))
+      build_gpu_accels();
+    else
+#endif
+      build_cpu_accels();
 
     /* call postCommit function of each geometry */
     parallel_for(geometries.size(), [&] ( const size_t i ) {
-        if (geometries[i]) geometries[i]->postCommit();
+        if (geometries[i] && geometries[i]->isEnabled()) {
+          geometries[i]->postCommit();
+          vertices[i] = geometries[i]->getCompactVertexArray();
+          geometryModCounters_[i] = geometries[i]->getModCounter();
+        }
       });
-      
-    updateInterface();
 
-    if (device->verbosity(2)) {
-      std::cout << "created scene intersector" << std::endl;
-      accels.print(2);
-      std::cout << "selected scene intersector" << std::endl;
-      intersectors.print(2);
-    }
-    
     setModified(false);
   }
 
+  void Scene::setBuildQuality(RTCBuildQuality quality_flags_i)
+  {
+    if (quality_flags == quality_flags_i) return;
+    quality_flags = quality_flags_i;
+    flags_modified = true;
+  }
+
+  RTCBuildQuality Scene::getBuildQuality() const {
+    return quality_flags;
+  }
+
+  void Scene::setSceneFlags(RTCSceneFlags scene_flags_i)
+  {
+    if (scene_flags == scene_flags_i) return;
+    scene_flags = scene_flags_i;
+    flags_modified = true;
+  }
+
+  RTCSceneFlags Scene::getSceneFlags() const {
+    return scene_flags;
+  }
+                   
 #if defined(TASKING_INTERNAL)
 
-  void Scene::commit (size_t threadIndex, size_t threadCount, bool useThreadPool) 
+  void Scene::commit (bool join) 
   {
     Lock<MutexSys> buildLock(buildMutex,false);
 
     /* allocates own taskscheduler for each build */
     Ref<TaskScheduler> scheduler = nullptr;
     { 
-      Lock<MutexSys> lock(schedulerMutex);
-      scheduler = this->scheduler;
+      Lock<MutexSys> lock(taskGroup->schedulerMutex);
+      scheduler = taskGroup->scheduler;
       if (scheduler == null) {
         buildLock.lock();
-        this->scheduler = scheduler = new TaskScheduler;
+        taskGroup->scheduler = scheduler = new TaskScheduler;
       }
     }
 
     /* worker threads join build */
-    if (!buildLock.isLocked()) {
+    if (!buildLock.isLocked())
+    {
+      if (!join) 
+        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"use rtcJoinCommitScene to join a build operation");
+      
       scheduler->join();
       return;
     }
 
-    /* wait for all threads in rtcCommitThread mode */
-    if (threadCount != 0)
-      scheduler->wait_for_threads(threadCount);
-
-    /* fast path for unchanged scenes */
-    if (!isModified()) {
-      scheduler->spawn_root([&]() { this->scheduler = nullptr; }, 1, useThreadPool);
-      return;
-    }
-
-    /* report error if scene not ready */
-    if (!ready()) {
-      scheduler->spawn_root([&]() { this->scheduler = nullptr; }, 1, useThreadPool);
-      throw_RTCError(RTC_INVALID_OPERATION,"not all buffers are unmapped");
-    }
-
     /* initiate build */
     try {
-      scheduler->spawn_root([&]() { commit_task(); this->scheduler = nullptr; }, 1, useThreadPool);
+      TaskScheduler::TaskGroupContext context;
+      scheduler->spawn_root([&]() { commit_task(); Lock<MutexSys> lock(taskGroup->schedulerMutex); taskGroup->scheduler = nullptr; }, &context, 1, !join);
     }
     catch (...) {
-      accels.clear();
-      updateInterface();
+      accels_clear();
+      Lock<MutexSys> lock(taskGroup->schedulerMutex);
+      taskGroup->scheduler = nullptr;
       throw;
     }
   }
 
 #endif
 
-#if defined(TASKING_TBB) || defined(TASKING_PPL)
+#if defined(TASKING_TBB)
 
-  void Scene::commit (size_t threadIndex, size_t threadCount, bool useThreadPool) 
-  {
-    /* let threads wait for build to finish in rtcCommitThread mode */
-    if (threadCount != 0) {
+  void Scene::commit (bool join) 
+  {    
 #if defined(TASKING_TBB) && (TBB_INTERFACE_VERSION_MAJOR < 8)
-      throw_RTCError(RTC_INVALID_OPERATION,"rtcCommitThread not supported");
+    if (join)
+      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcJoinCommitScene not supported with this TBB version");
 #endif
-      if (threadIndex > 0) {
-        group_barrier.wait(threadCount); // FIXME: use barrier that waits in condition
-        group->wait();
-        return;
-      }
-    }
 
     /* try to obtain build lock */
     Lock<MutexSys> lock(buildMutex,buildMutex.try_lock());
 
     /* join hierarchy build */
-    if (!lock.isLocked()) {
-#if defined(TASKING_TBB) && (TBB_INTERFACE_VERSION_MAJOR < 8)
-      throw_RTCError(RTC_INVALID_OPERATION,"join not supported");
+    if (!lock.isLocked())
+    {
+#if !TASKING_TBB_USE_TASK_ISOLATION
+      if (!join) 
+        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"invoking rtcCommitScene from multiple threads is not supported with this TBB version");
 #endif
-#if USE_TASK_ARENA
-      device->arena->execute([&]{ group->wait(); });
-#else
-      group->wait();
-#endif
-      while (!buildMutex.try_lock()) {
-        __pause_cpu();
+      
+      do {
+        device->execute(join, [&](){ taskGroup->group.wait(); });
+
+        pause_cpu();
         yield();
-#if USE_TASK_ARENA
-        device->arena->execute([&]{ group->wait(); });
-#else
-        group->wait();
-#endif
-      }
+      } while (!buildMutex.try_lock());
+      
       buildMutex.unlock();
       return;
-    }
-
-    if (!isModified()) {
-      if (threadCount) group_barrier.wait(threadCount);
-      return;
-    }
-
-    if (!ready()) {
-      if (threadCount) group_barrier.wait(threadCount);
-      throw_RTCError(RTC_INVALID_OPERATION,"not all buffers are unmapped");
-      return;
-    }
+    }   
 
     /* for best performance set FTZ and DAZ flags in the MXCSR control and status register */
-    unsigned int mxcsr = _mm_getcsr();
+    const unsigned int mxcsr = _mm_getcsr();
     _mm_setcsr(mxcsr | /* FTZ */ (1<<15) | /* DAZ */ (1<<6));
     
     try {
-#if defined(TASKING_TBB)
 #if TBB_INTERFACE_VERSION_MAJOR < 8    
       tbb::task_group_context ctx( tbb::task_group_context::isolated, tbb::task_group_context::default_traits);
 #else
       tbb::task_group_context ctx( tbb::task_group_context::isolated, tbb::task_group_context::default_traits | tbb::task_group_context::fp_settings );
 #endif
       //ctx.set_priority(tbb::priority_high);
+      device->execute(join, [&]()
+      {
+        taskGroup->group.run([&]{
+            tbb::parallel_for (size_t(0), size_t(1), size_t(1), [&] (size_t) { commit_task(); }, ctx);
+          });
+        taskGroup->group.wait();
+      });
 
-#if USE_TASK_ARENA
-      device->arena->execute([&]{
-#endif
-          group->run([&]{
-              tbb::parallel_for (size_t(0), size_t(1), size_t(1), [&] (size_t) { commit_task(); }, ctx);
-            });
-          if (threadCount) group_barrier.wait(threadCount);
-          group->wait();
-#if USE_TASK_ARENA
-        }); 
-#endif
-     
       /* reset MXCSR register again */
       _mm_setcsr(mxcsr);
-#else
-      group->run([&]{
-          concurrency::parallel_for(size_t(0), size_t(1), size_t(1), [&](size_t) { commit_task(); });
-        });
-      if (threadCount) group_barrier.wait(threadCount);
-      group->wait();
-
-#endif
     } 
-    catch (...) {
-
+    catch (...)
+    {
       /* reset MXCSR register again */
       _mm_setcsr(mxcsr);
       
-      accels.clear();
-      updateInterface();
+      accels_clear();
       throw;
     }
   }
 #endif
 
-  void Scene::setProgressMonitorFunction(RTCProgressMonitorFunc func, void* ptr) 
+#if defined(TASKING_PPL)
+
+  void Scene::commit (bool join) 
+  {
+#if defined(TASKING_PPL)
+    if (join)
+      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"rtcJoinCommitScene not supported with PPL");
+#endif
+
+    /* try to obtain build lock */
+    Lock<MutexSys> lock(buildMutex);
+
+    checkIfModifiedAndSet ();
+    if (!isModified()) {
+      return;
+    }
+
+    /* for best performance set FTZ and DAZ flags in the MXCSR control and status register */
+    const unsigned int mxcsr = _mm_getcsr();
+    _mm_setcsr(mxcsr | /* FTZ */ (1<<15) | /* DAZ */ (1<<6));
+    
+    try {
+
+      taskGroup->group.run([&]{
+          concurrency::parallel_for(size_t(0), size_t(1), size_t(1), [&](size_t) { commit_task(); });
+        });
+      taskGroup->group.wait();
+
+       /* reset MXCSR register again */
+      _mm_setcsr(mxcsr);
+    } 
+    catch (...)
+    {
+      /* reset MXCSR register again */
+      _mm_setcsr(mxcsr);
+      
+      accels_clear();
+      throw;
+    }
+  }
+#endif
+
+  void Scene::setProgressMonitorFunction(RTCProgressMonitorFunction func, void* ptr) 
   {
     progress_monitor_function = func;
     progress_monitor_ptr      = ptr;
@@ -971,531 +995,8 @@ namespace isa
     if (progress_monitor_function) {
       size_t n = size_t(dn) + progress_monitor_counter.fetch_add(size_t(dn));
       if (!progress_monitor_function(progress_monitor_ptr, n / (double(numPrimitives())))) {
-        throw_RTCError(RTC_CANCELLED,"progress monitor forced termination");
+        throw_RTCError(RTC_ERROR_CANCELLED,"progress monitor forced termination");
       }
     }
   }
-
-  DeviceInterface* Scene::getDevice() {
-    return device;
-  }
-
-  GeometryInterface* Scene::getGeometry (unsigned geomID) {
-    return get(geomID);
-  }
-
-  GeometryInterface* Scene::getGeometryLocked (unsigned geomID) {
-    return get_locked(geomID);
-  }
-
-  void Scene::rtcGetBounds(RTCBounds& bounds_o)
-  {
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    BBox3fa bounds = this->bounds.bounds();
-    bounds_o.lower_x = bounds.lower.x;
-    bounds_o.lower_y = bounds.lower.y;
-    bounds_o.lower_z = bounds.lower.z;
-    bounds_o.align0  = 0;
-    bounds_o.upper_x = bounds.upper.x;
-    bounds_o.upper_y = bounds.upper.y;
-    bounds_o.upper_z = bounds.upper.z;
-    bounds_o.align1  = 0;
-  }
-
-  void Scene::rtcGetLinearBounds(RTCBounds* bounds_o)
-  {
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    bounds_o[0].lower_x = bounds.bounds0.lower.x;
-    bounds_o[0].lower_y = bounds.bounds0.lower.y;
-    bounds_o[0].lower_z = bounds.bounds0.lower.z;
-    bounds_o[0].align0  = 0;
-    bounds_o[0].upper_x = bounds.bounds0.upper.x;
-    bounds_o[0].upper_y = bounds.bounds0.upper.y;
-    bounds_o[0].upper_z = bounds.bounds0.upper.z;
-    bounds_o[0].align1  = 0;
-    bounds_o[1].lower_x = bounds.bounds1.lower.x;
-    bounds_o[1].lower_y = bounds.bounds1.lower.y;
-    bounds_o[1].lower_z = bounds.bounds1.lower.z;
-    bounds_o[1].align0  = 0;
-    bounds_o[1].upper_x = bounds.bounds1.upper.x;
-    bounds_o[1].upper_y = bounds.bounds1.upper.y;
-    bounds_o[1].upper_z = bounds.bounds1.upper.z;
-    bounds_o[1].align1  = 0;
-  }
-  
-  void Scene::rtcIntersect (RTCRay& ray) 
-  {
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT3(normal.travs,1,1,1);
-    IntersectContext context(this,nullptr);
-    intersect(ray,&context);
-  }
-
-  void Scene::rtcIntersect1Ex (const RTCIntersectContext* user_context, RTCRay& ray) 
-  {
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT3(normal.travs,1,1,1);
-    IntersectContext context(this,user_context);
-    intersect(ray,&context);
-  }
-
-  void Scene::rtcIntersect4 (const void* valid, RTCRay4& ray) 
-  {
-#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,4);
-    IntersectContext context(this,nullptr);
-    intersect4(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect4 not supported");  
-#endif
-  }
-
-  void Scene::rtcIntersect4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray) 
-  {
-#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,4);
-    IntersectContext context(this,user_context);
-    intersect4(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect4Ex not supported");  
-#endif
-  }
-  
-  void Scene::rtcIntersect8 (const void* valid, RTCRay8& ray) 
-  {
-#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,8);
-    IntersectContext context(this,nullptr);
-    intersect8(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect8 not supported");      
-#endif
-  }
-
-  void Scene::rtcIntersect8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray) 
-  {
-#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,8);
-    IntersectContext context(this,user_context);
-    intersect8(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect8Ex not supported");
-#endif
-  }
-  
-  void Scene::rtcIntersect16 (const void* valid, RTCRay16& ray) 
-  {
-#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,16);
-    IntersectContext context(this,nullptr);
-    intersect16(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect16 not supported");
-#endif
-  }
-
-  void Scene::rtcIntersect16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray) 
-  {
-#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,1,cnt,16);
-    IntersectContext context(this,user_context);
-    intersect16(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect16Ex not supported");
-#endif
-  }
-
-  void Scene::rtcIntersect1M (const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(normal.travs,M,M,M);
-    IntersectContext context(this,user_context);
-
-    /* fast codepath for single rays */
-    if (likely(M == 1)) {
-      if (likely(rays->tnear <= rays->tfar)) 
-        intersect(*rays,&context);
-    } 
-
-    /* codepath for streams */
-    else {
-      device->rayStreamFilters.filterAOS(this,rays,M,stride,&context,true);   
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect1M not supported");
-#endif
-  }
-
-  void Scene::rtcIntersect1Mp (const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(normal.travs,M,M,M);
-    IntersectContext context(this,user_context);
-
-    /* fast codepath for single rays */
-    if (likely(M == 1)) {
-      if (likely(rays[0]->tnear <= rays[0]->tfar)) 
-        intersect(*rays[0],&context);
-    } 
-
-    /* codepath for streams */
-    else {
-      device->rayStreamFilters.filterAOP(this,rays,M,&context,true);   
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect1Mp not supported");
-#endif
-  }
-
-  void Scene::rtcIntersectNM (const RTCIntersectContext* user_context, struct RTCRayN* rays, const size_t N, const size_t M, const size_t stride) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(normal.travs,N*M,N*M,N*M);
-    IntersectContext context(this,user_context);
-
-    /* code path for single ray streams */
-    if (likely(N == 1))
-    {
-      /* fast code path for streams of size 1 */
-      if (likely(M == 1)) {
-        if (likely(((RTCRay*)rays)->tnear <= ((RTCRay*)rays)->tfar))
-          intersect(*(RTCRay*)rays,&context);
-      } 
-      /* normal codepath for single ray streams */
-      else {
-        device->rayStreamFilters.filterAOS(this,(RTCRay*)rays,M,stride,&context,true);
-      }
-    }
-    /* code path for ray packet streams */
-    else {
-      device->rayStreamFilters.filterSOA(this,(char*)rays,N,M,stride,&context,true);
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersectNM not supported");
-#endif
-  }
-
-  void Scene::rtcIntersectNp (const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays.orgx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgx not aligned to 4 bytes");   
-    if (((size_t)rays.orgy   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgy not aligned to 4 bytes");   
-    if (((size_t)rays.orgz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgz not aligned to 4 bytes");   
-    if (((size_t)rays.dirx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
-    if (((size_t)rays.diry   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.diry not aligned to 4 bytes");   
-    if (((size_t)rays.dirz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirz not aligned to 4 bytes");   
-    if (((size_t)rays.tnear  ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
-    if (((size_t)rays.tfar   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.tnear not aligned to 4 bytes");   
-    if (((size_t)rays.time   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.time not aligned to 4 bytes");   
-    if (((size_t)rays.mask   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.mask not aligned to 4 bytes");   
-    if (((size_t)rays.Ngx    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngx not aligned to 4 bytes");   
-    if (((size_t)rays.Ngy    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngy not aligned to 4 bytes");   
-    if (((size_t)rays.Ngz    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngz not aligned to 4 bytes");   
-    if (((size_t)rays.u      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.u not aligned to 4 bytes");   
-    if (((size_t)rays.v      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.v not aligned to 4 bytes");   
-    if (((size_t)rays.geomID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.geomID not aligned to 4 bytes");   
-    if (((size_t)rays.primID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.primID not aligned to 4 bytes");   
-    if (((size_t)rays.instID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.instID not aligned to 4 bytes");   
-#endif
-    STAT3(normal.travs,N,N,N);
-    IntersectContext context(this,user_context);
-    device->rayStreamFilters.filterSOP(this,rays,N,&context,true);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersectNp not supported");
-#endif
-  }
-  
-  void Scene::rtcOccluded (RTCRay& ray) 
-  {
-    STAT3(shadow.travs,1,1,1);
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    IntersectContext context(this,nullptr);
-    occluded(ray,&context);
-  }
-
-  void Scene::rtcOccluded1Ex (const RTCIntersectContext* user_context, RTCRay& ray) 
-  {
-    STAT3(shadow.travs,1,1,1);
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    IntersectContext context(this,user_context);
-    occluded(ray,&context);
-  }
-  
-  void Scene::rtcOccluded4 (const void* valid, RTCRay4& ray) 
-  {
-#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,4);
-    IntersectContext context(this,nullptr);
-    occluded4(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded4 not supported");
-#endif
-  }
-
-  void Scene::rtcOccluded4Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay4& ray) 
-  {
-#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,4);
-    IntersectContext context(this,user_context);
-    occluded4(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded4Ex not supported");
-#endif
-  }
- 
-  void Scene::rtcOccluded8 (const void* valid, RTCRay8& ray) 
-  {
-#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,8);
-    IntersectContext context(this,nullptr);
-    occluded8(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded8 not supported");
-#endif
-  }
-
-  void Scene::rtcOccluded8Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay8& ray) 
-  {
-#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,8);
-    IntersectContext context(this,user_context);
-    occluded8(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded8Ex not supported");
-#endif
-  }
-  
-  void Scene::rtcOccluded16 (const void* valid, RTCRay16& ray) 
-  {
-#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,16);
-    IntersectContext context(this,nullptr);
-    occluded16(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded16 not supported");
-#endif
-  }
-
-  void Scene::rtcOccluded16Ex (const void* valid, const RTCIntersectContext* user_context, RTCRay16& ray) 
-  {
-#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,1,cnt,16);
-    IntersectContext context(this,user_context);
-    occluded16(valid,ray,&context);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded16Ex not supported");
-#endif
-  }
-  
-  void Scene::rtcOccluded1M(const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(shadow.travs,M,M,M);
-    IntersectContext context(this,user_context);
-
-    /* fast codepath for streams of size 1 */
-    if (likely(M == 1)) {
-      if (likely(rays->tnear <= rays->tfar)) 
-        occluded (*rays,&context);
-    } 
-    /* codepath for normal streams */
-    else {
-      device->rayStreamFilters.filterAOS(this,rays,M,stride,&context,false);
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded1M not supported");
-#endif
-  }
-
-  void Scene::rtcOccluded1Mp(const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(shadow.travs,M,M,M);
-    IntersectContext context(this,user_context);
-
-    /* fast codepath for streams of size 1 */
-    if (likely(M == 1)) {
-      if (likely(rays[0]->tnear <= rays[0]->tfar)) 
-        occluded (*rays[0],&context);
-    } 
-    /* codepath for normal streams */
-    else {
-      device->rayStreamFilters.filterAOP(this,rays,M,&context,false);
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded1Mp not supported");
-#endif
-  }
-
-  void Scene::rtcOccludedNM(const RTCIntersectContext* user_context, RTCRayN* rays, const size_t N, const size_t M, const size_t stride) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (stride < sizeof(RTCRay)) throw_RTCError(RTC_INVALID_OPERATION,"stride too small");
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
-#endif
-    STAT3(shadow.travs,N*M,N*N,N*N);
-    IntersectContext context(this,user_context);
-
-    /* codepath for single rays */
-    if (likely(N == 1))
-    {
-      /* fast path for streams of size 1 */
-      if (likely(M == 1)) {
-        if (likely(((RTCRay*)rays)->tnear <= ((RTCRay*)rays)->tfar))
-          occluded (*(RTCRay*)rays,&context);
-      } 
-      /* codepath for normal ray streams */
-      else {
-        device->rayStreamFilters.filterAOS(this,(RTCRay*)rays,M,stride,&context,false);
-      }
-    }
-    /* code path for ray packet streams */
-    else {
-      device->rayStreamFilters.filterSOA(this,(char*)rays,N,M,stride,&context,false);
-    }
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccludedNM not supported");
-#endif
-  }
-
-  void Scene::rtcOccludedNp(const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) 
-  {
-#if defined (EMBREE_RAY_PACKETS)
-#if defined(DEBUG)
-    if (isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)rays.orgx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgx not aligned to 4 bytes");   
-    if (((size_t)rays.orgy   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgy not aligned to 4 bytes");   
-    if (((size_t)rays.orgz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgz not aligned to 4 bytes");   
-    if (((size_t)rays.dirx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
-    if (((size_t)rays.diry   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.diry not aligned to 4 bytes");   
-    if (((size_t)rays.dirz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirz not aligned to 4 bytes");   
-    if (((size_t)rays.tnear  ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
-    if (((size_t)rays.tfar   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.tnear not aligned to 4 bytes");   
-    if (((size_t)rays.time   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.time not aligned to 4 bytes");   
-    if (((size_t)rays.mask   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.mask not aligned to 4 bytes");   
-    if (((size_t)rays.Ngx    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngx not aligned to 4 bytes");   
-    if (((size_t)rays.Ngy    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngy not aligned to 4 bytes");   
-    if (((size_t)rays.Ngz    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngz not aligned to 4 bytes");   
-    if (((size_t)rays.u      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.u not aligned to 4 bytes");   
-    if (((size_t)rays.v      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.v not aligned to 4 bytes");   
-    if (((size_t)rays.geomID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.geomID not aligned to 4 bytes");   
-    if (((size_t)rays.primID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.primID not aligned to 4 bytes");   
-    if (((size_t)rays.instID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.instID not aligned to 4 bytes");   
-#endif
-    STAT3(shadow.travs,N,N,N);
-    IntersectContext context(this,user_context);
-    device->rayStreamFilters.filterSOP(this,rays,N,&context,false);
-#else
-    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccludedNp not supported");
-#endif
-  }
-}
 }

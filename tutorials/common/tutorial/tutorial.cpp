@@ -25,7 +25,6 @@
 #include "../scenegraph/geometry_creation.h"
 #include "../scenegraph/obj_loader.h"
 #include "../scenegraph/xml_loader.h"
-//#include "../scenegraph/rtas_loader.h"
 #include "../image/image.h"
 
 #if defined(EMBREE_SYCL_SUPPORT) && defined(EMBREE_SYCL_TUTORIAL)
@@ -80,28 +79,36 @@ namespace embree
   {
     if (code == RTC_ERROR_NONE)
       return;
-
-    printf("Embree: %s", rtcGetErrorString(code));
+    
+    printf("Embree: ");
+    switch (code) {
+    case RTC_ERROR_UNKNOWN          : printf("RTC_ERROR_UNKNOWN"); break;
+    case RTC_ERROR_INVALID_ARGUMENT : printf("RTC_ERROR_INVALID_ARGUMENT"); break;
+    case RTC_ERROR_INVALID_OPERATION: printf("RTC_ERROR_INVALID_OPERATION"); break;
+    case RTC_ERROR_OUT_OF_MEMORY    : printf("RTC_ERROR_OUT_OF_MEMORY"); break;
+    case RTC_ERROR_UNSUPPORTED_CPU  : printf("RTC_ERROR_UNSUPPORTED_CPU"); break;
+    case RTC_ERROR_CANCELLED        : printf("RTC_ERROR_CANCELLED"); break;
+    default                         : printf("invalid error code"); break;
+    }
     if (str) {
       printf(" (");
       while (*str) putchar(*str++);
       printf(")\n");
-    } else {
-      printf("\n");
     }
     exit(1);
   }
 
   TutorialApplication* TutorialApplication::instance = nullptr;
 
-  TutorialApplication::TutorialApplication (const std::string& tutorialName, int features, int w, int h)
+  TutorialApplication::TutorialApplication (const std::string& tutorialName, int features)
 
     : Application(features),
       tutorialName(tutorialName),
 
-      width(w),
-      height(h),
+      width(512),
+      height(512),
       pixels(nullptr),
+      pixels_device(nullptr),
 
       outputImageFilename(""),
       referenceImageFilename(""),
@@ -143,7 +150,7 @@ namespace embree
     /* only a single instance of this class is supported */
     assert(instance == nullptr);
     instance = this;
-
+    
     /* for best performance set FTZ and DAZ flags in MXCSR control and status register */
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -268,8 +275,10 @@ namespace embree
     g_ispc_scene = nullptr;
     ispc_scene = nullptr;
     device_cleanup();
+    if (pixels) alignedUSMFree(pixels);
+    if (pixels_device) alignedUSMFree(pixels_device);    
     if (g_device) rtcReleaseDevice(g_device);
-    alignedUSMFree(pixels);
+    
     pixels = nullptr;
 
 #if defined(EMBREE_SYCL_SUPPORT)
@@ -302,7 +311,11 @@ namespace embree
       remove_non_mblur(false),
       sceneFilename(),
       instancing_mode(SceneGraph::INSTANCING_NONE),
-      print_scene_cameras(false)
+      print_scene_cameras(false),
+      displace(false),
+      displace_resX(0),
+      displace_resY(0),
+      displace_height(0)
   {
     registerOption("i", [this] (Ref<ParseStream> cin, const FileName& path) {
         sceneFilename.push_back(path + cin->getFileName());
@@ -612,6 +625,18 @@ namespace embree
     registerOption("camera", [this] (Ref<ParseStream> cin, const FileName& path) {
         camera_name = cin->getString();
       }, "--camera: use camera with specified name");
+
+    registerOption("displace", [this] (Ref<ParseStream> cin, const FileName& path) {
+      displace = true;
+      displace_resX = min(max(cin->getInt(),1),0x7fff);
+      displace_resY = min(max(cin->getInt(),1),0x7fff);
+      displace_height = cin->getFloat();
+    }, "--displace: sets displacement res and height for quad primitive");
+
+    registerOption("subdivide-grids", [this] (Ref<ParseStream> cin, const FileName& path) {
+        sgop.push_back(SUBDIVIDE_GRIDS);
+      }, "--subdivide-grids: subdivides grids");
+    
   }
 
   void TutorialApplication::initRayStats()
@@ -638,15 +663,11 @@ namespace embree
     initRayStats();
     
     for (unsigned int i=0; i<numFrames; i++)
-    {
-      double t0 = getSeconds();
       render(pixels,width,height,render_time,ispccamera);
-      double t1 = getSeconds();
-      std::cout << "Render time = " << (t1-t0)*1000.0 << " ms => " << 1.0 / (t1-t0) << " fps" << std::endl;
-    }
     
     Ref<Image> image = new Image4uc(width, height, (Col4uc*)pixels);
     storeImage(image, fileName);
+    exit(0);
   }
 
   void TutorialApplication::compareToReferenceImage(const FileName& fileName)
@@ -678,7 +699,11 @@ namespace embree
     this->height = height;
       
     if (pixels) alignedUSMFree(pixels);
-    pixels = (unsigned*) alignedUSMMalloc(width*height*sizeof(unsigned),64,EMBREE_USM_SHARED_DEVICE_READ_WRITE);
+    if (pixels_device) alignedUSMFree(pixels_device);
+    
+    //pixels = (unsigned*) alignedUSMMalloc(width*height*sizeof(unsigned),64,EMBREE_USM_SHARED_DEVICE_READ_WRITE);
+    pixels = (unsigned*) alignedUSMMalloc(width*height*sizeof(unsigned),64,EMBREE_USM_HOST);
+    pixels_device = (unsigned*) alignedUSMMalloc(width*height*sizeof(unsigned),64,EMBREE_DEVICE_READ_WRITE);        
   }
 
   void TutorialApplication::set_scene (TutorialScene* in)
@@ -811,7 +836,9 @@ namespace embree
           
         case GLFW_KEY_ESCAPE:
         case GLFW_KEY_Q: 
-          glfwSetWindowShouldClose(window,1);
+          //glfwSetWindowShouldClose(window,1);
+          device_cleanup();
+          exit(0);
           break;
         }
       }
@@ -856,7 +883,11 @@ namespace embree
         }
       }
       else if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
-        printf("pixel pos (%d, %d)\n", (int)x, (int)y);
+        ISPCCamera ispccamera = camera.getISPCCamera(width,height);
+        Vec3fa p; 
+        device_pick(float(x),float(y),ispccamera,p);
+        printf("pixel pos (%d, %d) \n", (int)x, (int)y);
+        
       }
       else
       {
@@ -937,17 +968,20 @@ namespace embree
     
     double render_dt = avg_render_time.get();
     double render_fps = render_dt != 0.0 ? 1.0f/render_dt : 0.0;
-    ImGui::Text("Render: %3.2f fps",render_fps);
+    ImGui::Text("Render Time:          %4.4f ms -> %3.2f fps",1000.f*render_dt,render_fps);
 
     double total_dt = avg_frame_time.get();
     double total_fps = total_dt != 0.0 ? 1.0f/total_dt : 0.0;
-    ImGui::Text("Total: %3.2f fps",total_fps);
+    ImGui::Text("Total Time per Frame: %4.4f ms -> %3.2f fps",1000.f*total_dt,total_fps);
 
 #if defined(RAY_STATS) && !defined(EMBREE_SYCL_TUTORIAL)
     ImGui::Text("%3.2f Mray/s",avg_mrayps.get());
 #endif
+
+    device_gui();
+    
     ImGui::End();
-     
+
     //ImGui::ShowDemoWindow();
         
     ImGui::Render();
@@ -1046,8 +1080,26 @@ namespace embree
   
   void TutorialApplication::render(unsigned* pixels, const unsigned width, const unsigned height, const float time, const ISPCCamera& camera)
   {
-    device_render(pixels,width,height,time,camera);
-    renderFrame((int*)pixels,width,height,time,camera);
+#if defined(EMBREE_SYCL_SUPPORT)
+    if (global_gpu_queue)
+      {
+	device_render(pixels_device,width,height,time,camera);
+	renderFrame((int*)pixels_device,width,height,time,camera);	
+	sycl::event event_memcpy = global_gpu_queue->memcpy(pixels,pixels_device,width*height*sizeof(unsigned));
+	try {
+	  event_memcpy.wait_and_throw();
+	} catch (sycl::exception const& e) {
+	  std::cout << "Caught synchronous SYCL exception:\n"
+		    << e.what() << std::endl;
+	  FATAL("SYCL Exception");     
+	}
+      }
+    else
+#endif      
+      {
+	device_render(pixels,width,height,time,camera);
+	renderFrame((int*)pixels,width,height,time,camera);	
+      }
   }
   
   void TutorialApplication::run(int argc, char** argv)
@@ -1084,7 +1136,7 @@ namespace embree
   void TutorialApplication::create_device()
   {
 #if defined(EMBREE_SYCL_SUPPORT) && defined(EMBREE_SYCL_TUTORIAL)
-
+    
     /* create SYCL device */
     if (features & FEATURE_SYCL)
     {
@@ -1122,16 +1174,17 @@ namespace embree
       } catch(std::exception& e) {
         std::cerr << "Caught exception creating sycl::device: " << e.what() << std::endl;
         printAllSYCLDevices();
-        throw;
+        return;
       }
       sycl::platform platform = device->get_platform();
       log(1, "Selected SYCL Platform: " + platform.get_info<sycl::info::platform::name>());
       log(1, "Selected SYCL Device: " + device->get_info<sycl::info::device::name>());
 
+      queue = new sycl::queue(*device, exception_handler, { sycl::property::queue::in_order(), sycl::property::queue::enable_profiling() });
       context = new sycl::context(*device);
-      queue = new sycl::queue(*context, *device, exception_handler, { sycl::property::queue::in_order(), sycl::property::queue::enable_profiling() });
+
       g_device = rtcNewSYCLDevice(*context,rtcore.c_str());
-      error_handler(nullptr,rtcGetDeviceError(g_device),rtcGetDeviceLastErrorMessage(g_device));
+      error_handler(nullptr,rtcGetDeviceError(g_device));
       global_gpu_device = device;
       global_gpu_context = context;
       global_gpu_queue = queue;
@@ -1141,6 +1194,8 @@ namespace embree
       }
 
       enableUSMAllocTutorial(global_gpu_context, global_gpu_device);
+
+      
     }
 
     /* create standard device */
@@ -1161,6 +1216,7 @@ namespace embree
     /* parse command line options */
     parseCommandLine(argc,argv);
 
+    
     /* callback */
     postParseCommandLine();
 
@@ -1184,7 +1240,7 @@ namespace embree
   {
     /* parse command line options */
     parseCommandLine(argc,argv);
-
+    
     /* callback */
     try {
       postParseCommandLine();
@@ -1192,7 +1248,7 @@ namespace embree
     catch (const std::exception& e) {
       std::cout << "Error: " << e.what() << std::endl;
     }
-
+    
     /* create embree device */
     create_device();
     
@@ -1225,10 +1281,6 @@ namespace embree
         scene->add(loadOBJ(keyFramesFilenames[i],subdiv_mode != "",true));
       else if (keyFramesFilenames[i].ext() != "")
         scene->add(SceneGraph::load(keyFramesFilenames[i]));
-
-      //if (toLowerCase(keyFramesFilenames[i].ext()) == std::string("rtas"))
-      //  scene->add(loadRTAS(keyFramesFilenames[i],true));
-
       
       if (verbosity >= 1) 
         std::cout << " [DONE]" << std::endl << std::flush;
@@ -1263,10 +1315,11 @@ namespace embree
       case MERGE_QUADS_TO_GRIDS         : scene->merge_quads_to_grids(); break;
       case CONVERT_QUADS_TO_GRIDS       : scene->quads_to_grids(grid_resX,grid_resY); break;
       case CONVERT_GRIDS_TO_QUADS       : scene->grids_to_quads(); break;
-      case CONVERT_MBLUR_TO_NONMBLUR    : convert_mblur_to_nonmblur(scene.dynamicCast<SceneGraph::Node>()); break;
+      case CONVERT_MBLUR_TO_NONMBLUR    : convert_mblur_to_nonmblur(scene.dynamicCast<SceneGraph::Node>()); break;        
       default : throw std::runtime_error("unsupported scene graph operation");
       }
     }
+        
     Application::instance->log(1,"converting scene done");
 
     if (verbosity >= 1) {

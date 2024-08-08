@@ -488,4 +488,9 @@ extern "C" void device_cleanup ()
   rtcReleaseDevice(g_device); g_device = nullptr;
 }
 
+ extern "C" void device_gui()
+{
+}
+
+
 } // namespace embree

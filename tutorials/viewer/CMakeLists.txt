@@ -8,7 +8,7 @@ ENDIF()
 INCLUDE(tutorial)
 ADD_TUTORIAL(viewer viewer_device_debug.cpp)
 ADD_TUTORIAL_ISPC(viewer viewer_device_debug.ispc)
-ADD_TUTORIAL_SYCL(viewer viewer_device_debug.cpp)
+ADD_TUTORIAL_SYCL(viewer viewer_device_debug.cpp pathtracer)
 
 SET(viewer_tests 
   "models/curves/curve0.ecs"
