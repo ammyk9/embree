@@ -61,20 +61,19 @@ namespace embree
 #endif
   };
 
-  enum ISPCType { TRIANGLE_MESH, SUBDIV_MESH, CURVES, INSTANCE, INSTANCE_ARRAY, GROUP, QUAD_MESH, GRID_MESH, POINTS };
+  enum ISPCType { TRIANGLE_MESH, SUBDIV_MESH, CURVES, INSTANCE, GROUP, QUAD_MESH, GRID_MESH, POINTS };
 
   struct ISPCGeometry
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCGeometry (ISPCType type) : type(type), geometry(nullptr), materialID(-1), visited(false) {}
+    ISPCGeometry (ISPCType type) : type(type), geometry(nullptr), scene(nullptr), unused(-1), materialID(-1) {}
     ~ISPCGeometry () { if (geometry) rtcReleaseGeometry(geometry); }
 #endif
     ISPCType type;
     RTCGeometry geometry;
+    RTCScene scene;
+    unsigned int unused;
     unsigned int materialID;
-    bool visited;
   };
 
 #if !defined(ISPC)
@@ -88,13 +87,8 @@ namespace embree
   struct ISPCTriangleMesh
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-
-    ISPCTriangleMesh (RTCDevice device, unsigned int numTriangles, unsigned int numPositions, bool hasNormals, bool hasTexcoords, unsigned int numTimeSteps = 1);
-    ISPCTriangleMesh (RTCDevice device, TutorialScene* scene_in, Ref<SceneGraph::TriangleMeshNode> in);
+    ISPCTriangleMesh (TutorialScene* scene_in, Ref<SceneGraph::TriangleMeshNode> in);
     ~ISPCTriangleMesh ();
-
-    void commit();
 
   private:
     ISPCTriangleMesh (const ISPCTriangleMesh& other) DELETED; // do not implement
@@ -119,12 +113,8 @@ namespace embree
   struct ISPCQuadMesh
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCQuadMesh (RTCDevice device, TutorialScene* scene_in, Ref<SceneGraph::QuadMeshNode> in);
+    ISPCQuadMesh (TutorialScene* scene_in, Ref<SceneGraph::QuadMeshNode> in);
     ~ISPCQuadMesh ();
-
-    void commit();
 
   private:
     ISPCQuadMesh (const ISPCQuadMesh& other) DELETED; // do not implement
@@ -149,12 +139,8 @@ namespace embree
   struct ISPCSubdivMesh
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCSubdivMesh (RTCDevice device, TutorialScene* scene_in, Ref<SceneGraph::SubdivMeshNode> in);
+    ISPCSubdivMesh (TutorialScene* scene_in, Ref<SceneGraph::SubdivMeshNode> in);
     ~ISPCSubdivMesh ();
-
-    void commit();
     
   private:
     ISPCSubdivMesh (const ISPCSubdivMesh& other) DELETED; // do not implement
@@ -198,12 +184,8 @@ namespace embree
   struct ISPCHairSet
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCHairSet (RTCDevice device, TutorialScene* scene_in, RTCGeometryType type, Ref<SceneGraph::HairSetNode> in);
+    ISPCHairSet (TutorialScene* scene_in, RTCGeometryType type, Ref<SceneGraph::HairSetNode> in);
     ~ISPCHairSet();
-
-    void commit();
 
   private:
     ISPCHairSet (const ISPCHairSet& other) DELETED; // do not implement
@@ -236,12 +218,8 @@ namespace embree
   struct ISPCPointSet
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCPointSet (RTCDevice device, TutorialScene* scene_in, RTCGeometryType type, Ref<SceneGraph::PointSetNode> in);
+    ISPCPointSet (TutorialScene* scene_in, RTCGeometryType type, Ref<SceneGraph::PointSetNode> in);
     ~ISPCPointSet();
-
-    void commit();
 
   private:
     ISPCPointSet (const ISPCPointSet& other) DELETED; // do not implement
@@ -264,12 +242,8 @@ namespace embree
   struct ISPCGridMesh
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-    
-    ISPCGridMesh (RTCDevice device, TutorialScene* scene_in, Ref<SceneGraph::GridMeshNode> in);
+    ISPCGridMesh (TutorialScene* scene_in, Ref<SceneGraph::GridMeshNode> in);
     ~ISPCGridMesh ();
-
-    void commit();
 
   private:
     ISPCGridMesh (const ISPCGridMesh& other) DELETED; // do not implement
@@ -293,13 +267,8 @@ namespace embree
   struct ISPCInstance
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-
-    ISPCInstance (RTCDevice device, unsigned int numTimeSteps = 1);
-    ISPCInstance (RTCDevice device, TutorialScene* scene, Ref<SceneGraph::TransformNode> in);
+    ISPCInstance (TutorialScene* scene, Ref<SceneGraph::TransformNode> in);
     ~ISPCInstance();
-
-    void commit();
 
   private:
     ISPCInstance (const ISPCInstance& other) DELETED; // do not implement
@@ -317,44 +286,11 @@ namespace embree
     AffineSpace3fa* spaces;
   };
 
-  struct ISPCInstanceArray
-  {
-#if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-
-    ISPCInstanceArray(RTCDevice device, unsigned int numTimeSteps = 1);
-    ISPCInstanceArray(RTCDevice device, TutorialScene* scene, Ref<SceneGraph::MultiTransformNode> in);
-    ~ISPCInstanceArray();
-
-    void commit();
-
-  private:
-    ISPCInstanceArray(const ISPCInstanceArray& other) DELETED; // do not implement
-    ISPCInstanceArray& operator= (const ISPCInstanceArray& other) DELETED; // do not implement
-
-  public:
-#endif
-
-    ISPCGeometry geom;
-    ISPCGeometry* child;
-    float startTime;
-    float endTime;
-    unsigned int numTimeSteps;
-    unsigned int numInstances;
-    bool quaternion;
-    AffineSpace3fa** spaces_array;
-  };
-
   struct ISPCGroup
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-
-    ISPCGroup (RTCDevice device,  unsigned int numGeometries);
-    ISPCGroup (RTCDevice device, TutorialScene* scene, Ref<SceneGraph::GroupNode> in);
+    ISPCGroup (TutorialScene* scene, Ref<SceneGraph::GroupNode> in);
     ~ISPCGroup();
-
-    void commit();
     
   private:
     ISPCGroup (const ISPCGroup& other) DELETED; // do not implement
@@ -363,29 +299,18 @@ namespace embree
   public:
 #endif
     ISPCGeometry geom;
-    RTCScene scene;
     ISPCGeometry** geometries;
     unsigned int numGeometries;
-    unsigned int requiredInstancingDepth; // instancing depth required for this group
   };
   
   struct ISPCScene
   {
 #if !defined(ISPC)
-    ALIGNED_STRUCT_USM_(16);
-
-    ISPCScene(RTCDevice device, unsigned int numGeometries, unsigned int numMaterials, unsigned int numLights);
-    ISPCScene(RTCDevice device, TutorialScene* in);
+    ISPCScene(TutorialScene* in);
     ~ISPCScene();
-
-    void commit();
     
-    static ISPCGeometry* convertGeometry (RTCDevice device, TutorialScene* scene, Ref<SceneGraph::Node> in);   
-    static Light* convertLight(Ref<SceneGraph::LightNode> in);
-    static Light* createLight(Ref<SceneGraph::LightNode> in);
-
-    template<typename LightNode> static void updateLight(const LightNode& in, Light* out);
-    static void updateLight(const Ref<SceneGraph::LightNode>& in, Light* out);
+    static ISPCGeometry* convertGeometry (TutorialScene* scene, Ref<SceneGraph::Node> in);   
+    static Light* convertLight(Ref<SceneGraph::Light> in);
     
   private:
     ISPCScene (const ISPCScene& other) DELETED; // do not implement
@@ -393,7 +318,6 @@ namespace embree
     
   public:
 #endif
-    RTCScene scene;
     ISPCGeometry** geometries;   //!< list of geometries
     ISPCMaterial** materials;     //!< material list
     unsigned int numGeometries;           //!< number of geometries
@@ -401,7 +325,6 @@ namespace embree
     
     Light** lights;              //!< list of lights
     unsigned int numLights;               //!< number of lights
-    void* tutorialScene;
   };
 
 #if !defined(ISPC)
@@ -412,12 +335,10 @@ namespace embree
   extern uniform AssignShaderTy assignShadersFunc;
 #endif
   
-#if !defined(ISPC)
-  extern "C" void UpdateScene(ISPCScene* scene_in, float time);
-  extern "C" RTCScene ConvertScene(RTCDevice g_device, ISPCScene* scene_in, RTCBuildQuality quality, RTCSceneFlags flags = RTC_SCENE_FLAG_NONE, RTCFeatureFlags *used_features_out=nullptr);
+#if !defined(ISPC)  
+  extern "C" RTCScene ConvertScene(RTCDevice g_device, ISPCScene* scene_in, RTCBuildQuality quality, RTCSceneFlags flags = RTC_SCENE_FLAG_NONE);
 #else
-  unmasked extern "C" void UpdateScene(ISPCScene* uniform scene_in, uniform float time);
-  unmasked extern "C" RTCScene ConvertScene (RTCDevice g_device, ISPCScene* uniform scene_in, uniform RTCBuildQuality quality, uniform RTCSceneFlags flags = RTC_SCENE_FLAG_NONE, RTCFeatureFlags * uniform used_features_out=NULL);
+  unmasked extern "C" RTCScene ConvertScene (RTCDevice g_device, ISPCScene* uniform scene_in, uniform RTCBuildQuality quality, uniform RTCSceneFlags flags = RTC_SCENE_FLAG_NONE);
 #endif
 
 #if !defined(ISPC)                    

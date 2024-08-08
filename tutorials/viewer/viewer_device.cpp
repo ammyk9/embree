@@ -9,13 +9,6 @@ RTCScene g_scene = nullptr;
 extern "C" bool g_changed;
 TutorialData data;
 
-#if defined(EMBREE_SYCL_TUTORIAL) && !defined(EMBREE_SYCL_RT_SIMULATION) && defined(USE_SPECIALIZATION_CONSTANTS)
-const sycl::specialization_id<RTCFeatureFlags> spec_feature_mask;
-#endif
-
-extern "C" RTCFeatureFlags g_feature_mask;
-extern "C" bool g_use_scene_features;
-
 #define SPP 1
 
 #define FIXED_EDGE_TESSELLATION_VALUE 3
@@ -31,8 +24,8 @@ bool monitorProgressFunction(void* ptr, double dn)
 
 inline float updateEdgeLevel( ISPCSubdivMesh* mesh, const Vec3fa& cam_pos, const unsigned int e0, const unsigned int e1)
 {
-  const Vec3fa v0 = Vec3fa(mesh->positions[0][mesh->position_indices[e0]]);
-  const Vec3fa v1 = Vec3fa(mesh->positions[0][mesh->position_indices[e1]]);
+  const Vec3fa v0 = mesh->positions[0][mesh->position_indices[e0]];
+  const Vec3fa v1 = mesh->positions[0][mesh->position_indices[e1]];
   const Vec3fa edge = v1-v0;
   const Vec3fa P = 0.5f*(v1+v0);
   const Vec3fa dist = cam_pos - P;
@@ -110,6 +103,15 @@ void updateEdgeLevels(ISPCScene* scene_in, const Vec3fa& cam_pos)
   }
 }
 
+#if 0
+bool g_use_smooth_normals = false;
+void device_key_pressed_handler(int key)
+{
+  if (key == 110 /*n*/) g_use_smooth_normals = !g_use_smooth_normals;
+  else device_key_pressed_default(key);
+}
+#endif
+
 RTCScene convertScene(ISPCScene* scene_in)
 {
   for (unsigned int i=0; i<scene_in->numGeometries; i++)
@@ -120,9 +122,7 @@ RTCScene convertScene(ISPCScene* scene_in)
     }
   }
 
-  RTCFeatureFlags feature_mask = RTC_FEATURE_FLAG_NONE;
-  RTCScene scene_out = ConvertScene(g_device, g_ispc_scene, RTC_BUILD_QUALITY_MEDIUM, RTC_SCENE_FLAG_NONE, &feature_mask);
-  if (g_use_scene_features) g_feature_mask = feature_mask;
+  RTCScene scene_out = ConvertScene(g_device, g_ispc_scene, RTC_BUILD_QUALITY_MEDIUM);
   rtcSetSceneProgressMonitorFunction(scene_out,monitorProgressFunction,nullptr);
 
   /* commit changes to scene */
@@ -142,24 +142,11 @@ AffineSpace3fa calculate_interpolated_space (ISPCInstance* instance, float gtime
   return (1.0f-ftime)*AffineSpace3fa(instance->spaces[itime+0]) + ftime*AffineSpace3fa(instance->spaces[itime+1]);
 }
 
-AffineSpace3fa calculate_interpolated_space (ISPCInstanceArray* instanceArray, unsigned int primID, float gtime)
-{
-  if (instanceArray->numTimeSteps == 1)
-    return AffineSpace3fa(instanceArray->spaces_array[0][primID]);
-
-   /* calculate time segment itime and fractional time ftime */
-  const int time_segments = instanceArray->numTimeSteps-1;
-  const float time = gtime*(float)(time_segments);
-  const int itime = clamp((int)(floor(time)),(int)0,time_segments-1);
-  const float ftime = time - (float)(itime);
-  return (1.0f-ftime)*AffineSpace3fa(instanceArray->spaces_array[itime+0][primID]) + ftime*AffineSpace3fa(instanceArray->spaces_array[itime+1][primID]);
-}
-
 typedef ISPCInstance* ISPCInstancePtr;
 
 unsigned int postIntersect(const TutorialData& data, const Ray& ray, DifferentialGeometry& dg)
 {
-  AffineSpace3fa local2world = AffineSpace3fa::scale(Vec3fa(1));
+  AffineSpace3fa local2world = one;
   ISPCGeometry** geometries = data.ispc_scene->geometries;
   
   for (int i=0; i<RTC_MAX_INSTANCE_LEVEL_COUNT; i++)
@@ -167,21 +154,11 @@ unsigned int postIntersect(const TutorialData& data, const Ray& ray, Differentia
     const unsigned int instID = ray.instID[i];
     if (instID == -1) break;
 
-    if (geometries[instID]->type == INSTANCE) {
-      ISPCInstance* instance = (ISPCInstancePtr) geometries[instID];
-      local2world = local2world * calculate_interpolated_space(instance,ray.time());
-      assert(instance->child->type == GROUP);
-      geometries = ((ISPCGroup*)instance->child)->geometries;
-    }
-#if defined(RTC_GEOMETRY_INSTANCE_ARRAY)
-    else if (geometries[instID]->type == INSTANCE_ARRAY) {
-      ISPCInstanceArray* instanceArray = (ISPCInstanceArray*) geometries[instID];
-      local2world = local2world * calculate_interpolated_space(instanceArray, ray.instPrimID[i],ray.time());
-      assert(instanceArray->child->type == GROUP);
-      geometries = ((ISPCGroup*)instanceArray->child)->geometries;
-    }
-#endif
+    ISPCInstance* instance = (ISPCInstancePtr) geometries[instID];
+    local2world = local2world * calculate_interpolated_space(instance,ray.time());
 
+    assert(instance->child->type == GROUP);
+    geometries = ((ISPCGroup*)instance->child)->geometries;
   }
 
   ISPCGeometry* mesh = geometries[ray.geomID];
@@ -205,30 +182,24 @@ void renderPixelStandard(const TutorialData& data,
                          const unsigned int width,
                          const unsigned int height,
                          const float time,
-                         const ISPCCamera& camera,
-                         RayStats& stats,
-                         const RTCFeatureFlags feature_mask)
+                         const ISPCCamera& camera, RayStats& stats)
 {
   /* initialize sampler */
   RandomSampler sampler;
   RandomSampler_init(sampler, (int)x, (int)y, 0);
 
   /* initialize ray */
-  float ray_time = data.motion_blur ? RandomSampler_get1D(sampler) : time;
-  Ray ray(Vec3fa(camera.xfm.p), Vec3fa(normalize(x*camera.xfm.l.vx + y*camera.xfm.l.vy + camera.xfm.l.vz)), 0.0f, inf, ray_time);
+  Ray ray(Vec3fa(camera.xfm.p), Vec3fa(normalize(x*camera.xfm.l.vx + y*camera.xfm.l.vy + camera.xfm.l.vz)), 0.0f, inf, RandomSampler_get1D(sampler));
 
   /* intersect ray with scene */
-  RTCIntersectArguments args;
-  rtcInitIntersectArguments(&args);
-  args.flags = data.iflags_coherent;
+  RTCIntersectContext context;
+  rtcInitIntersectContext(&context);
+  context.flags = data.iflags_coherent;
 #if RTC_MIN_WIDTH
-  args.minWidthDistanceFactor = 0.5f*data.min_width/width;
+  context.minWidthDistanceFactor = 0.5f*data.min_width/width;
 #endif
-  args.feature_mask = feature_mask;
-  
-  rtcIntersect1(data.scene,RTCRayHit_(ray),&args);
+  rtcIntersect1(data.scene,&context,RTCRayHit_(ray));
   RayStats_addRay(stats);
-
 
   /* shade background black */
   if (ray.geomID == RTC_INVALID_GEOMETRY_ID) {
@@ -254,7 +225,7 @@ void renderPixelStandard(const TutorialData& data,
     if (ray.geomID != RTC_INVALID_GEOMETRY_ID) // FIXME: workaround for ISPC bug, location reached with empty execution mask
     {
       Vec3fa dPdu,dPdv;
-      auto geomID = ray.geomID; {
+      unsigned int geomID = ray.geomID; {
         rtcInterpolate1(rtcGetGeometry(data.scene,geomID),ray.primID,ray.u,ray.v,RTC_BUFFER_TYPE_VERTEX,0,nullptr,&dPdu.x,&dPdv.x,3);
       }
       dg.Ns = cross(dPdv,dPdu);
@@ -299,7 +270,7 @@ void renderTileTask (int taskIndex, int threadIndex, int* pixels,
 
   for (unsigned int y=y0; y<y1; y++) for (unsigned int x=x0; x<x1; x++)
   {
-    renderPixelStandard(data,x,y,pixels,width,height,time,camera,g_stats[threadIndex],g_feature_mask);
+    renderPixelStandard(data,x,y,pixels,width,height,time,camera,g_stats[threadIndex]);
   }
 }
 
@@ -318,42 +289,6 @@ extern "C" void renderFrameStandard (int* pixels,
                           const float time,
                           const ISPCCamera& camera)
 {
-#if defined(EMBREE_SYCL_TUTORIAL) && !defined(EMBREE_SYCL_RT_SIMULATION)
-  TutorialData ldata = data;
-
-#if defined(USE_SPECIALIZATION_CONSTANTS)
-  sycl::event event = global_gpu_queue->submit([=](sycl::handler& cgh) {
-    cgh.set_specialization_constant<spec_feature_mask>(g_feature_mask);
-    const sycl::nd_range<2> nd_range = make_nd_range(height,width);
-    cgh.parallel_for(nd_range,[=](sycl::nd_item<2> item, sycl::kernel_handler kh) {
-      const unsigned int x = item.get_global_id(1); if (x >= width ) return;
-      const unsigned int y = item.get_global_id(0); if (y >= height) return;
-      RayStats stats;
-      const RTCFeatureFlags feature_mask = kh.get_specialization_constant<spec_feature_mask>();
-      renderPixelStandard(ldata,x,y,pixels,width,height,time,camera,stats,feature_mask);
-    });
-  });
-  global_gpu_queue->wait_and_throw();
-#else
-  sycl::event event = global_gpu_queue->submit([=](sycl::handler& cgh) {
-    const sycl::nd_range<2> nd_range = make_nd_range(height,width);
-    cgh.parallel_for(nd_range,[=](sycl::nd_item<2> item) {
-      const unsigned int x = item.get_global_id(1); if (x >= width ) return;
-      const unsigned int y = item.get_global_id(0); if (y >= height) return;
-      RayStats stats;
-      const RTCFeatureFlags feature_mask = RTC_FEATURE_FLAG_ALL;
-      renderPixelStandard(ldata,x,y,pixels,width,height,time,camera,stats,feature_mask);
-    });
-  });
-  global_gpu_queue->wait_and_throw();
-#endif
-
-  const auto t0 = event.template get_profiling_info<sycl::info::event_profiling::command_start>();
-  const auto t1 = event.template get_profiling_info<sycl::info::event_profiling::command_end>();
-  const double dt = (t1-t0)*1E-9;
-  ((ISPCCamera*)&camera)->render_time = dt;
- 
-#else
   /* render image */
   const int numTilesX = (width +TILE_SIZE_X-1)/TILE_SIZE_X;
   const int numTilesY = (height+TILE_SIZE_Y-1)/TILE_SIZE_Y;
@@ -362,7 +297,6 @@ extern "C" void renderFrameStandard (int* pixels,
     for (size_t i=range.begin(); i<range.end(); i++)
       renderTileTask((int)i,threadIndex,pixels,width,height,time,camera,numTilesX,numTilesY);
   }); 
-#endif
 }
 
 /* called by the C++ code to render */
@@ -395,9 +329,6 @@ extern "C" void device_render (int* pixels,
       updateEdgeLevels(g_ispc_scene,camera.xfm.p);
       rtcCommitScene (data.scene);
     }
-
-    if (g_animation_mode)
-      UpdateScene(g_ispc_scene, time);
   }
 }
 
