@@ -1,5 +1,5 @@
 ## ======================================================================== ##
-## Copyright 2017 Kitware, Inc.                                             ##
+## Copyright 2009-2012 Intel Corporation                                    ##
 ##                                                                          ##
 ## Licensed under the Apache License, Version 2.0 (the "License");          ##
 ## you may not use this file except in compliance with the License.         ##
@@ -13,11 +13,39 @@
 ## See the License for the specific language governing permissions and      ##
 ## limitations under the License.                                           ##
 ## ======================================================================== ##
-SET(FLAGS_SSE2      "-target-cpu=x86_64")
-SET(FLAGS_SSE42     "NOT_SUPPORTED")
-SET(FLAGS_AVX       "-target-cpu=sandybridge")
-SET(FLAGS_AVX2      "-target-cpu=haswell")
-SET(FLAGS_AVX512 "-target-cpu=x86-skylake")
 
-STRING(TOLOWER "${CMAKE_CXX_COMPILER_ID}" _lower_compiler_id)
-INCLUDE("${CMAKE_CURRENT_LIST_DIR}/${_lower_compiler_id}.cmake" OPTIONAL)
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
+
+SET(USE_STAT_COUNTERS false CACHE BOOL "Set to 1 to activate statistics counters")
+
+IF (USE_STAT_COUNTERS)
+ADD_DEFINITIONS(-D__USE_STAT_COUNTERS__)
+ENDIF (USE_STAT_COUNTERS)
+
+ADD_LIBRARY(rtcore STATIC
+
+  common/accel.cpp
+  common/alloc.cpp
+  common/stat.cpp 
+  common/primrefgen.cpp 
+  common/heuristic_binning.cpp 
+  common/heuristic_spatial.cpp 
+  common/splitter.cpp 
+  common/splitter_parallel.cpp 
+  common/splitter_fallback.cpp 
+
+  bvh2/bvh2.cpp   
+  bvh2/bvh2_intersector.cpp   
+  bvh2/bvh2_builder.cpp   
+
+  bvh4/bvh4.cpp   
+  bvh4/bvh4_intersector.cpp   
+  bvh4/bvh4_intersector_watertight.cpp   
+  bvh4/bvh4_builder.cpp   
+
+  bvh4mb/bvh4mb.cpp   
+  bvh4mb/bvh4mb_builder.cpp   
+  bvh4mb/bvh4mb_intersector.cpp   
+)
+
+TARGET_LINK_LIBRARIES(rtcore sys)
