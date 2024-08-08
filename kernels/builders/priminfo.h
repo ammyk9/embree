@@ -173,8 +173,8 @@ namespace embree
 	//return halfArea(geomBounds)*blocks(num); 
       }
       
-      __forceinline float leafSAH(size_t block_shift) const { 
-	return expectedApproxHalfArea(geomBounds)*float((size()+(size_t(1)<<block_shift)-1) >> block_shift);
+      __forceinline float leafSAH(size_t sahBlockSize) const {
+	return expectedApproxHalfArea(geomBounds)*float((size()+sahBlockSize-1) / sahBlockSize);
 	//return halfArea(geomBounds)*float((num+3) >> 2);
 	//return halfArea(geomBounds)*blocks(num); 
       }
@@ -243,8 +243,8 @@ namespace embree
 	return time_range.size()*expectedApproxHalfArea(geomBounds)*float(num_time_segments); 
       }
       
-      __forceinline float leafSAH(size_t block_shift) const { 
-	return time_range.size()*expectedApproxHalfArea(geomBounds)*float((num_time_segments+(size_t(1)<<block_shift)-1) >> block_shift);
+      __forceinline float leafSAH(size_t sahBlockSize) const {
+	return time_range.size()*expectedApproxHalfArea(geomBounds)*float((num_time_segments+sahBlockSize-1) / sahBlockSize);
       }
       
       /*! stream output */
