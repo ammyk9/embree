@@ -3,24 +3,14 @@
 
 #pragma once
 
-#if defined(ZE_RAYTRACING)
-#include "sys/sysinfo.h"
-#include "sys/vector.h"
-#include "math/vec2.h"
-#include "math/vec3.h"
-#include "math/bbox.h"
-#include "math/affinespace.h"
-#else
 #include "../../../common/sys/sysinfo.h"
 #include "../../../common/sys/vector.h"
+#include "../../../include/embree4/rtcore.h"
 #include "../../../common/math/vec2.h"
 #include "../../../common/math/vec3.h"
 #include "../../../common/math/bbox.h"
 #include "../../../common/math/lbbox.h"
 #include "../../../common/math/affinespace.h"
-#endif
-
-#include "node_type.h"
 
 #include <map>
 #include <bitset>
@@ -92,11 +82,13 @@ namespace embree
     PrimLeafDesc(uint32_t shaderIndex, uint32_t geomIndex, GeometryFlags gflags, uint32_t geomMask, Type type = TYPE_NONE)
     : shaderIndex(shaderIndex), geomMask(geomMask), geomIndex(geomIndex), type(type), geomFlags((uint32_t)gflags)
     {
+#if !defined(__SYCL_DEVICE_ONLY__)      
       if (shaderIndex > MAX_SHADER_INDEX)
         throw std::runtime_error("too large shader ID");
       
       if (geomIndex > MAX_GEOM_INDEX)
         throw std::runtime_error("too large geometry ID");
+#endif      
     }
 
     /* compares two PrimLeafDesc's for equality */
@@ -148,6 +140,7 @@ namespace embree
   public:
     uint32_t shaderIndex : 24;    // shader index used for shader record calculations
     uint32_t geomMask    : 8;     // geometry mask used for ray masking
+      
  
     uint32_t geomIndex      : 29; // the geometry index specifies the n'th geometry of the scene
     /*Type*/ uint32_t type  : 1;  // enable/disable culling for procedurals and instances
@@ -167,6 +160,10 @@ namespace embree
   {
     QuadLeaf() {}
 
+    QuadLeaf(const QuadLeaf &q) {
+      memcpy( this,&q, sizeof(QuadLeaf) );
+    }
+    
     QuadLeaf (Vec3f v0, Vec3f v1, Vec3f v2, Vec3f v3,
               uint8_t j0, uint8_t j1, uint8_t j2,
               uint32_t shaderIndex, uint32_t geomIndex, uint32_t primIndex0, uint32_t primIndex1,
@@ -174,7 +171,7 @@ namespace embree
 
       : leafDesc(shaderIndex,geomIndex,gflags,geomMask),
         primIndex0(primIndex0), 
-        primIndex1Delta(primIndex1-primIndex0), pad1(0),
+        primIndex1Delta(primIndex1-primIndex0),
         j0(j0),j1(j1),j2(j2),last(last),pad(0),
         v0(v0), v1(v1), v2(v2), v3(v3)
     {
@@ -183,6 +180,9 @@ namespace embree
        * distance between them can be at most 0xFFFF as we use 16 bits
        * to encode that difference. */
       assert(primIndex0 <= primIndex1 && primIndex1 - primIndex0 < 0xFFFF);
+// #if !defined(__SYCL_DEVICE_ONLY__)
+//       print(std::cout,0);
+// #endif      
     }
 
     /* returns the i'th vertex */
@@ -284,23 +284,26 @@ namespace embree
     }
 
   public:
-    PrimLeafDesc leafDesc;  // the leaf header
-
-    uint32_t primIndex0;    // primitive index of first triangle
-    struct {
-      uint32_t primIndex1Delta : 5;  // delta encoded primitive index of second triangle
-      uint32_t pad1            : 11; // MBZ
-      uint32_t j0              : 2;   // specifies first vertex of second triangle
-      uint32_t j1              : 2;   // specified second vertex of second triangle
-      uint32_t j2              : 2;   // specified third vertex of second triangle    
-      uint32_t last            : 1;   // true if the second triangle is the last triangle in a leaf list
-      uint32_t pad             : 9;   // unused bits
+    union {
+      struct {
+        PrimLeafDesc leafDesc;  // the leaf header
+        uint32_t primIndex0;    // primitive index of first triangle
+        struct {
+          uint32_t primIndex1Delta : 16;  // delta encoded primitive index of second triangle
+          uint32_t j0              : 2;   // specifies first vertex of second triangle
+          uint32_t j1              : 2;   // specified second vertex of second triangle
+          uint32_t j2              : 2;   // specified third vertex of second triangle    
+          uint32_t last            : 1;   // true if the second triangle is the last triangle in a leaf list
+          uint32_t pad             : 9;   // unused bits
+        };
+      };
+      uint header[4];
     };
     
     Vec3f v0;  // first vertex of first triangle
     Vec3f v1;  // second vertex of first triangle
     Vec3f v2;  // third vertex of first triangle
-    Vec3f v3;  // forth vertex used for second triangle
+    Vec3f v3;  // forth vertex used for second triangle    
   };
 
   static_assert(sizeof(QuadLeaf) == 64, "QuadLeaf must be 64 bytes large");
@@ -521,7 +524,6 @@ namespace embree
   };
 
   static_assert(sizeof(InstanceLeaf) == 128, "InstanceLeaf must be 128 bytes large");
-
 
   /*
     Leaf type for procedural geometry. This leaf only contains the

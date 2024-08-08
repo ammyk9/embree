@@ -25,6 +25,7 @@
 #include "../scenegraph/geometry_creation.h"
 #include "../scenegraph/obj_loader.h"
 #include "../scenegraph/xml_loader.h"
+//#include "../scenegraph/rtas_loader.h"
 #include "../image/image.h"
 
 #if defined(EMBREE_SYCL_SUPPORT) && defined(EMBREE_SYCL_TUTORIAL)
@@ -637,7 +638,12 @@ namespace embree
     initRayStats();
     
     for (unsigned int i=0; i<numFrames; i++)
+    {
+      double t0 = getSeconds();
       render(pixels,width,height,render_time,ispccamera);
+      double t1 = getSeconds();
+      std::cout << "Render time = " << (t1-t0)*1000.0 << " ms => " << 1.0 / (t1-t0) << " fps" << std::endl;
+    }
     
     Ref<Image> image = new Image4uc(width, height, (Col4uc*)pixels);
     storeImage(image, fileName);
@@ -1219,6 +1225,10 @@ namespace embree
         scene->add(loadOBJ(keyFramesFilenames[i],subdiv_mode != "",true));
       else if (keyFramesFilenames[i].ext() != "")
         scene->add(SceneGraph::load(keyFramesFilenames[i]));
+
+      //if (toLowerCase(keyFramesFilenames[i].ext()) == std::string("rtas"))
+      //  scene->add(loadRTAS(keyFramesFilenames[i],true));
+
       
       if (verbosity >= 1) 
         std::cout << " [DONE]" << std::endl << std::flush;

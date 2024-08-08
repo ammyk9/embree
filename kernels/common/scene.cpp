@@ -732,7 +732,10 @@ namespace embree
   {
     /* select acceleration structures to build */
     unsigned int new_enabled_geometry_types = world.enabledGeometryTypesMask();
-
+// #if defined(EMBREE_SYCL_SUPPORT)
+//     if (!dynamic_cast<DeviceGPU*>(device)) // do not build software accel for GPU if not required
+// #endif
+      
     if (flags_modified || new_enabled_geometry_types != enabled_geometry_types)
     {
       accels_init();
@@ -772,6 +775,18 @@ namespace embree
     /* build all hierarchies of this scene */
     accels_build();
 
+    /* build acceleration structure for rthw */
+// #if defined(EMBREE_SYCL_SUPPORT)
+//     if (DeviceGPU* gpu_device = dynamic_cast<DeviceGPU*>(device))
+//       //if (gpu_device->rthw_support())
+//       //  bounds = LBBox<embree::Vec3fa>(rthwifBuild(this,quality_flags,hwaccel,device->gpu_build));
+//       if (gpu_device->rthw_support()) {
+//         const BBox3f aabb = rthwifBuild(this,quality_flags,hwaccel,device->gpu_build);
+//         bounds = LBBox<embree::Vec3fa>(aabb);
+//         hwaccel_bounds = aabb;
+//       }
+// #endif
+    
     /* make static geometry immutable */
     if (!isDynamicAccel()) {
       accels_immutable();

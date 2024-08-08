@@ -102,7 +102,7 @@ namespace embree
     };
 
     BVHStatistics ()
-    : numScenePrimitives(0), numBuildPrimitives(0), numBuildPrimitivesPostSplit(0) {}
+      : numScenePrimitives(0), numBuildPrimitives(0), numBuildPrimitivesPostSplit(0), depth(1) {}
         
     void print    (std::ostream& cout) const;
     void print_raw(std::ostream& cout) const;
@@ -110,6 +110,7 @@ namespace embree
     size_t numScenePrimitives;
     size_t numBuildPrimitives;
     size_t numBuildPrimitivesPostSplit;
+    size_t depth;
     NodeStat internalNode;
     LeafStat quadLeaf;
     LeafStat proceduralLeaf;

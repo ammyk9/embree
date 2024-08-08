@@ -1,78 +1,51 @@
 ## Copyright 2009-2021 Intel Corporation
 ## SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.1.0)
 
-project(ze_raytracing)
+project(embree_rthwif)
 
-INCLUDE(CTest)
-
-SET(RTHWIF_VERSION_MAJOR 4)
-SET(RTHWIF_VERSION_MINOR 1)
-SET(RTHWIF_VERSION_PATCH 0)
-SET(RTHWIF_VERSION ${RTHWIF_VERSION_MAJOR}.${RTHWIF_VERSION_MINOR}.${RTHWIF_VERSION_PATCH})
+IF(COMMAND cmake_policy)
+  if(POLICY CMP0135)
+    message("set policy CMP0135 to NEW")
+    cmake_policy(SET CMP0135 NEW)
+  endif()
+ENDIF()
 
 SET(CMAKE_CXX_STANDARD 17)
 
-IF (NOT DEFINED EMBREE_VERSION_MAJOR)
-  
-  SET(RTHWIF_STANDALONE ON)
-  SET(RTHWIF_NAME ze_raytracing)
-  ADD_DEFINITIONS("-DRTHWIF_STANDALONE")
+#####################################################################
+# This is required when compiling this folder stand alone
 
+#SET(OPTION BUILD_TESTING ON)
+INCLUDE(CTest)
+
+IF (NOT DEFINED EMBREE_CMAKEEXPORT_DIR)
   SET(EMBREE_CMAKEEXPORT_DIR "cmake")
+ENDIF()
 
+IF (NOT DEFINED EMBREE_SYCL_IMPLICIT_DISPATCH_GLOBALS)
   OPTION(EMBREE_SYCL_IMPLICIT_DISPATCH_GLOBALS "Using L0 allocated Dispatch Globals" ON)
+ENDIF()
+
+IF (NOT EMBREE_SYCL_IMPLICIT_DISPATCH_GLOBALS)
+  ADD_DEFINITIONS("-DEMBREE_SYCL_ALLOC_DISPATCH_GLOBALS")
+ENDIF()
+
+IF (NOT DEFINED EMBREE_SYCL_SUPPORT)
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")                       # generate position independent code suitable for shared libraries
   
-  SET(EMBREE_RTHWIF_STATIC_LIB OFF)
-  SET(EMBREE_BUILDER_TBB_STATIC ON)
-
-  SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  SET(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" ${CMAKE_MODULE_PATH})
-
-  CONFIGURE_FILE(
-    "${PROJECT_SOURCE_DIR}/../../kernels/config.h.in"
-    "${PROJECT_SOURCE_DIR}/../../kernels/config.h"
-    )
-
-  SET(EMBREE_MAX_INSTANCE_LEVEL_COUNT 1)
-  CONFIGURE_FILE(
-    "${PROJECT_SOURCE_DIR}/../../kernels/rtcore_config.h.in"
-    "${PROJECT_SOURCE_DIR}/../../include/embree4/rtcore_config.h"
-    )
-
-  IF (NOT WIN32)
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")                       # generate position independent code suitable for shared libraries
-  ENDIF()
-
   ADD_SUBDIRECTORY(../../common/sys sys)
   ADD_SUBDIRECTORY(../../common/simd simd)
 
   GET_FILENAME_COMPONENT(SYCL_COMPILER_DIR ${CMAKE_CXX_COMPILER} PATH)
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isystem \"${SYCL_COMPILER_DIR}/../include/sycl\" -isystem \"${SYCL_COMPILER_DIR}/../include/\"")       # disable warning from SYCL header (FIXME: why required?)
-
-  find_package(TBB 2020)
-      
-ELSE()
-  SET(RTHWIF_NAME embree_rthwif)
-  OPTION(EMBREE_RTHWIF_STATIC_LIB "Build RTHWIF as a static library." ON)
-  option(EMBREE_BUILDER_TBB_STATIC "Use a staticaly compiled TBB version for the Embree builder for GPU." OFF)
-ENDIF()
-
-IF (EMBREE_SYCL_RT_VALIDATION_API AND NOT EMBREE_SYCL_IMPLICIT_DISPATCH_GLOBALS)
-    ADD_DEFINITIONS("-DEMBREE_SYCL_ALLOC_DISPATCH_GLOBALS")
 ENDIF()
 
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-bitwise-instead-of-logical") # disables "use of bitwise '&' with boolean operands" warning
 SET(CMAKE_CXX_FLAGS_SYCL "${CMAKE_CXX_FLAGS_SYCL} -Wno-bitwise-instead-of-logical") # disables "use of bitwise '&' with boolean operands" warning
 
-if (EMBREE_RTHWIF_STATIC_LIB)
-  set(RTHWIF_LIB_TYPE STATIC)
-else()
-  set(RTHWIF_LIB_TYPE SHARED)
-endif()
+option(EMBREE_BUILDER_TBB_STATIC "Use a staticly compiled TBB version for the Embree builder for GPU." OFF)
 
 # by default link against the tasking target that has all TBB related
 # information we need when TASKING_TBB is used
@@ -104,13 +77,12 @@ if (EMBREE_BUILDER_TBB_STATIC OR NOT TASKING_TBB)
     GIT_REPOSITORY ${EMBREE_RTHWIF_TBB_GIT_REPOSITORY}
     GIT_TAG v2021.6.0
   )
+  FetchContent_MakeAvailable(tbb_static)
 
-  FetchContent_GetProperties(tbb_static)
-  if(NOT tbb_static_POPULATED)
-    FetchContent_Populate(tbb_static)
-    # We want to build tbb_static to link it into embree_rthwif, but don't want to
-    # install it as part of the Embree install targets.
-    add_subdirectory(${tbb_static_SOURCE_DIR} ${tbb_static_BINARY_DIR} EXCLUDE_FROM_ALL)
+  # We want to build tbb_static to link it into embree_rthwif, but don't want to
+  # install it as part of the Embree install targets.
+  if (IS_DIRECTORY "${tbb_static_SOURCE_DIR}")
+    set_property(DIRECTORY ${tbb_static_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL YES)
   endif()
 
   MARK_AS_ADVANCED(FETCHCONTENT_BASE_DIR)
@@ -141,42 +113,54 @@ if (EMBREE_BUILDER_TBB_STATIC OR NOT TASKING_TBB)
   ####################################################################
 ENDIF()
 
-IF (RTHWIF_STANDALONE)
-  include(package_ze_raytracing)
-  INCLUDE(CPack)
-ENDIF()
-
 IF (EMBREE_SYCL_RT_VALIDATION_API)
-  ADD_LIBRARY(embree_rthwif_sycl STATIC rttrace/rttrace_validation.cpp)
+  ADD_LIBRARY(embree_rthwif_sycl STATIC rthwif_production.cpp)
   SET_PROPERTY(TARGET embree_rthwif_sycl APPEND PROPERTY COMPILE_FLAGS "-DEMBREE_SYCL_SUPPORT")
   SET_TARGET_PROPERTIES(embree_rthwif_sycl PROPERTIES COMPILE_FLAGS ${CMAKE_CXX_FLAGS_SYCL})
-
+  
   INSTALL(TARGETS embree_rthwif_sycl EXPORT embree_rthwif_sycl-targets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT lib)
   INSTALL(EXPORT embree_rthwif_sycl-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 
   SET(EMBREE_RTHWIF_SYCL embree_rthwif_sycl)
 ENDIF()
 
-IF (NOT EMBREE_SYCL_L0_RTAS_BUILDER)
-ADD_LIBRARY(embree_rthwif ${RTHWIF_LIB_TYPE} rtbuild/rtbuild.cpp rtbuild/qbvh6.cpp rtbuild/statistics.cpp)
-TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC ${EMBREE_RTHWIF_SYCL} PRIVATE ${TBB_TARGET} simd sys)
-SET_TARGET_PROPERTIES(embree_rthwif PROPERTIES OUTPUT_NAME ${RTHWIF_NAME})
-IF (EMBREE_RTHWIF_STATIC_LIB)
-  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_RTHWIF_STATIC_LIB)
+ADD_LIBRARY(embree_rthwif STATIC rthwif_builder.cpp builder/qbvh6.cpp builder/statistics.cpp)
+
+IF (EMBREE_SYCL_GPU_BVH_BUILDER)
+ADD_LIBRARY(embree_rthwif_gpu STATIC rthwif_embree_builder_ploc.cpp rthwif_embree_builder_stoch.cpp builder/qbvh6.cpp builder/statistics.cpp)
+TARGET_LINK_LIBRARIES(embree_rthwif_gpu PUBLIC tbb simd sys -lze_loader)
+SET_TARGET_PROPERTIES(embree_rthwif_gpu PROPERTIES COMPILE_FLAGS ${CMAKE_CXX_FLAGS_SYCL})
 ENDIF()
 
-TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_SYCL_SUPPORT)
+TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC ${EMBREE_RTHWIF_SYCL} PRIVATE ${TBB_TARGET} simd sys)
 
-IF (EMBREE_STATIC_LIB OR NOT EMBREE_RTHWIF_STATIC_LIB)
-  INSTALL(TARGETS embree_rthwif EXPORT ${RTHWIF_NAME}-targets
+if (EMBREE_LEVEL_ZERO)
+  TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC -lze_loader)
+  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_LEVEL_ZERO)
+  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_SYCL_SUPPORT)
+endif()
+
+IF (EMBREE_SYCL_GPU_BVH_BUILDER)
+  TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC embree_rthwif_gpu)
+ENDIF()
+
+SET_PROPERTY(TARGET embree_rthwif APPEND PROPERTY COMPILE_FLAGS "-DEMBREE_SYCL_SUPPORT")
+
+
+IF (EMBREE_STATIC_LIB)
+  INSTALL(TARGETS embree_rthwif EXPORT embree_rthwif-targets
     LIBRARY NAMELINK_SKIP DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT lib
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT examples
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT devel)
-  INSTALL(EXPORT ${RTHWIF_NAME}-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
+  INSTALL(EXPORT embree_rthwif-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 ENDIF()
+
+IF (EMBREE_SYCL_GPU_BVH_BUILDER)
+INSTALL(TARGETS embree_rthwif_gpu EXPORT embree_rthwif_gpu-targets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT lib)
+INSTALL(EXPORT embree_rthwif_gpu-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 ENDIF()
 
-ADD_SUBDIRECTORY(testing)
-
-
+IF (EMBREE_LEVEL_ZERO)
+  ADD_SUBDIRECTORY(testing)
+ENDIF()
 

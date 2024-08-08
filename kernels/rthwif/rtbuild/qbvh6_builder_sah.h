@@ -204,10 +204,12 @@ namespace embree
         __forceinline size_t end  () const { return prims.end(); }
         __forceinline size_t size () const { return prims.size(); }
         __forceinline bool   equalType() const { return type != UNKNOWN; }
-        
+
+#if !defined(__SYCL_DEVICE_ONLY__)        
         friend inline std::ostream& operator<<(std::ostream& cout, const BuildRecord& r) {
           return cout << "BuildRecord { depth = " << r.depth << ", pinfo = " << r.prims << ", type = " << r.type << " }";
         }
+#endif        
         
       public:
         size_t depth;        //!< Depth of the root of this subtree.
@@ -1058,6 +1060,9 @@ namespace embree
 
         ReductionTy build(uint32_t numGeometries, PrimInfo& pinfo_o, char* root)
         {
+          //PING;
+          //PRINT(numGeometries);
+          
           double t1 = verbose ? getSeconds() : 0.0;
 
           /* quadify all triangles */
@@ -1085,7 +1090,7 @@ namespace embree
           }, [](const PrimInfo& a, const PrimInfo& b) -> PrimInfo { return PrimInfo::merge(a,b); });
 
           double t3 = verbose ? getSeconds() : 0.0;
-          if (verbose) std::cout << "primrefgen   : " << std::setw(10) << (t3-t2)*1000.0 << "ms, " << std::setw(10) << 1E-6*double(numPrimitives)/(t3-t2) << " Mprims/s" << std::endl;
+          if (verbose) std::cout << "primrefgen   : " << numPrimitives << " " << std::setw(10) << (t3-t2)*1000.0 << "ms, " << std::setw(10) << 1E-6*double(numPrimitives)/(t3-t2) << " Mprims/s" << std::endl;
           
           /* if we need to filter out geometry, run again */
           if (pinfo.size() != numPrimitives)
@@ -1108,6 +1113,8 @@ namespace embree
           /* perform pre-splitting */
           if (useSpatialSplits(build_quality,build_flags) &&  numPrimitives)
           {
+            PRINT("PRE-SPLITTING DISABLED");
+            
             auto splitter = [this] (const PrimRef& prim, const size_t dim, const float pos, PrimRef& left_o, PrimRef& right_o) {
               splitTriangleOrQuad(prim,dim,pos,left_o,right_o);
             };
@@ -1222,6 +1229,14 @@ namespace embree
           qbvh->numTimeSegments = 1; 
           qbvh->dispatchGlobalsPtr = (uint64_t) dispatchGlobalsPtr;
 
+
+#if 0
+          BVHStatistics stats2 = qbvh->computeStatistics();
+          stats2.print(std::cout);
+          stats2.print_raw(std::cout);
+          qbvh->print();
+#endif
+          
 #if 0
           BVHStatistics stats = qbvh->computeStatistics();
           stats.print(std::cout);
@@ -1233,6 +1248,41 @@ namespace embree
           for (size_t i=0; i<bytes; i++) {
             if (i % 32 == 0) std::cout << std::endl << "  ";
             std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0') << (unsigned)((unsigned char*)accel)[i] << ", ";
+=======
+              /* fill QBVH6 header */
+              allocator.clear();
+              QBVH6* qbvh = new (accel.data()) QBVH6(QBVH6::SizeEstimate());
+              qbvh->numPrims = numPrimitives;
+              uint64_t rootNodeOffset = QBVH6::Node((char*)(r0.node - (char*)qbvh), r0.type, r0.primRange.cur_prim);
+              assert(rootNodeOffset == QBVH6::rootNodeOffset);
+              qbvh->bounds = bounds;
+              qbvh->numTimeSegments = max(1u,maxTimeSegments);
+              qbvh->dispatchGlobalsPtr = (uint64_t) dispatchGlobalsPtr;
+              break;
+            }
+            catch (std::bad_alloc&)
+            {
+              if (verbose) {
+                allocator.cleanup();
+                FastAllocator::AllStatistics stats1(&allocator);
+                stats1.print(numPrimitives);
+              }
+              
+              if (bytes >= worst_case_bytes) {
+                throw std::runtime_error("BVH build failed");
+                return empty;
+              }
+            }
+          }
+          
+          /* print BVH statistics in verbose mode */
+          if (verbose)
+          {
+            QBVH6* qbvh = (QBVH6*) accel.data();
+            BVHStatistics stats = qbvh->computeStatistics();
+            stats.print(std::cout);
+            stats.print_raw(std::cout);
+            qbvh->print();
           }
           std::cout << std::endl << "};" << std::endl;*/
 #endif

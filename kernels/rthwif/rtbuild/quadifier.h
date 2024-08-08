@@ -14,6 +14,8 @@
 #include "../../common/default.h"
 #endif
 
+#define WINDOW_SIZE 32
+
 namespace embree
 {
   enum QuadifierType : uint16_t
@@ -88,7 +90,7 @@ namespace embree
   }
 
   template<typename GetTriangleFunc>
-  __forceinline void merge_triangle_window( uint32_t geomID, static_deque<uint32_t,32>& triangleWindow, QuadifierType* quads_o, const GetTriangleFunc& getTriangle )
+  __forceinline void merge_triangle_window( uint32_t geomID, static_deque<uint32_t,WINDOW_SIZE>& triangleWindow, QuadifierType* quads_o, const GetTriangleFunc& getTriangle )
   {
     uint32_t primID0 = triangleWindow.pop_front();
     
@@ -128,7 +130,7 @@ namespace embree
   template<typename GetTriangleFunc>
   inline size_t pair_triangles( uint32_t geomID, QuadifierType* quads_o, uint32_t primID0, uint32_t primID1, const GetTriangleFunc& getTriangle ) 
   {
-    static_deque<uint32_t, 32> triangleWindow;
+    static_deque<uint32_t, WINDOW_SIZE> triangleWindow;
 
     size_t numTrianglePairs = 0;
     for (uint32_t primID=primID0; primID<primID1; primID++)
@@ -139,13 +141,11 @@ namespace embree
         merge_triangle_window(geomID, triangleWindow,quads_o,getTriangle);
         numTrianglePairs++;
       }
-    }
-    
+    }    
     while (triangleWindow.size()) {
       merge_triangle_window(geomID, triangleWindow,quads_o,getTriangle);
       numTrianglePairs++;
     }
-
     return numTrianglePairs;
   }
 }
