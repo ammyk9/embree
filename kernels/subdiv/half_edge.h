@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   class __aligned(32) HalfEdge
   {
     friend class SubdivMesh;
@@ -368,4 +370,5 @@ namespace embree
     VertexType vertex_type;         //!< stores type of the start vertex
     char align[2];
   };
+}
 }

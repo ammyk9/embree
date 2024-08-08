@@ -9,6 +9,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! represents an array of line segments */
   struct LineSegments : public Geometry
   {
@@ -631,4 +633,5 @@ namespace embree
   }
 
   DECLARE_ISA_FUNCTION(LineSegments*, createLineSegments, Device* COMMA Geometry::GType);
+}
 }

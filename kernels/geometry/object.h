@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   struct Object
   {
     struct Type : public PrimitiveType 
@@ -16,7 +18,7 @@ namespace embree
       size_t sizeTotal(const char* This) const;
       size_t getBytes(const char* This) const;
     };
-    static Type type;
+    static const Type& type();
 
   public:
 
@@ -92,4 +94,5 @@ namespace embree
     unsigned int _geomID;  //!< geometry ID
     unsigned int _primID;  //!< primitive ID
   };
+}
 }

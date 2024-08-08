@@ -10,6 +10,8 @@
 
 namespace embree
 {
+namespace isa
+{
   struct __aligned(64) FinalQuad {
     Vec3fa vtx[4];
   };
@@ -823,4 +825,5 @@ namespace embree
       return o;
     } 
   };  
+}
 }

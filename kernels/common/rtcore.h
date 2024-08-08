@@ -1,97 +1,82 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
-#include "../../include/embree4/rtcore.h"
-RTC_NAMESPACE_USE
+#include "../../include/embree2/rtcore.h"
 
 namespace embree
-{  
-  /*! decoding of intersection flags */
-  __forceinline bool isCoherent  (RTCRayQueryFlags flags) { return (flags & RTC_RAY_QUERY_FLAG_COHERENT) == RTC_RAY_QUERY_FLAG_COHERENT; }
-  __forceinline bool isIncoherent(RTCRayQueryFlags flags) { return (flags & RTC_RAY_QUERY_FLAG_COHERENT) == RTC_RAY_QUERY_FLAG_INCOHERENT; }
+{
+//namespace isa
+//{
+  /*! decoding of geometry flags */
+  __forceinline bool isStatic    (RTCSceneFlags flags) { return (flags & 1) == RTC_SCENE_STATIC; }
+  __forceinline bool isDynamic   (RTCSceneFlags flags) { return (flags & 1) == RTC_SCENE_DYNAMIC; }
 
-/*! Macros used in the rtcore API implementation */
-#if 0
-#  define RTC_CATCH_BEGIN
-#  define RTC_CATCH_END(device)
-#  define RTC_CATCH_END2(scene)
-#  define RTC_CATCH_END2_FALSE(scene) return false;
+  __forceinline bool isCompact   (RTCSceneFlags flags) { return (flags & RTC_SCENE_COMPACT) != 0; }
+  __forceinline bool isRobust    (RTCSceneFlags flags) { return (flags & RTC_SCENE_ROBUST) != 0; }
+  __forceinline bool isCoherent  (RTCSceneFlags flags) { return (flags & RTC_SCENE_COHERENT) != 0; }
+  __forceinline bool isIncoherent(RTCSceneFlags flags) { return (flags & RTC_SCENE_INCOHERENT) != 0; }
+  __forceinline bool isHighQuality(RTCSceneFlags flags) { return (flags & RTC_SCENE_HIGH_QUALITY) != 0; }
+
+  /*! decoding of algorithm flags */
+  __forceinline bool isInterpolatable(RTCAlgorithmFlags flags) { return (flags & RTC_INTERPOLATE) != 0; }
+  __forceinline bool isStreamMode(RTCAlgorithmFlags flags) { return (flags & RTC_INTERSECT_STREAM) != 0; }
+  __forceinline bool isIntersect1Mode(RTCAlgorithmFlags flags) { return (flags & RTC_INTERSECT1) != 0; }
+  __forceinline bool isIntersect4Mode(RTCAlgorithmFlags flags) { return (flags & RTC_INTERSECT4) != 0; }
+  __forceinline bool isIntersect8Mode(RTCAlgorithmFlags flags) { return (flags & RTC_INTERSECT8) != 0; }
+  __forceinline bool isIntersect16Mode(RTCAlgorithmFlags flags) { return (flags & RTC_INTERSECT16) != 0; }
+
+   /*! decoding of intersection flags */
+  __forceinline bool isCoherent  (RTCIntersectFlags flags) { return (flags & RTC_INTERSECT_INCOHERENT) == 0; }
+  __forceinline bool isIncoherent(RTCIntersectFlags flags) { return (flags & RTC_INTERSECT_INCOHERENT) != 0; }
+
+#if defined(TASKING_TBB) && (TBB_INTERFACE_VERSION_MAJOR >= 8)
+#  define USE_TASK_ARENA 1
 #else
-  
-#define RTC_CATCH_BEGIN try {
-  
-#define RTC_CATCH_END(device)                                                \
-  } catch (std::bad_alloc&) {                                                   \
-    Device::process_error(device,RTC_ERROR_OUT_OF_MEMORY,"out of memory");      \
-  } catch (rtcore_error& e) {                                                   \
-    Device::process_error(device,e.error,e.what());                             \
-  } catch (std::exception& e) {                                                 \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,e.what());                   \
-  } catch (...) {                                                               \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,"unknown exception caught"); \
-  }
-  
-#define RTC_CATCH_END2(scene)                                                \
-  } catch (std::bad_alloc&) {                                                   \
-    Device* device = scene ? scene->device : nullptr;		\
-    Device::process_error(device,RTC_ERROR_OUT_OF_MEMORY,"out of memory");      \
-  } catch (rtcore_error& e) {                                                   \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,e.error,e.what());                             \
-  } catch (std::exception& e) {                                                 \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,e.what());                   \
-  } catch (...) {                                                               \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,"unknown exception caught"); \
-  }
-
-#define RTC_CATCH_END2_FALSE(scene)                                             \
-  } catch (std::bad_alloc&) {                                                   \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,RTC_ERROR_OUT_OF_MEMORY,"out of memory");      \
-    return false;                                                               \
-  } catch (rtcore_error& e) {                                                   \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,e.error,e.what());                             \
-    return false;                                                               \
-  } catch (std::exception& e) {                                                 \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,e.what());                   \
-    return false;                                                               \
-  } catch (...) {                                                               \
-    Device* device = scene ? scene->device : nullptr;                           \
-    Device::process_error(device,RTC_ERROR_UNKNOWN,"unknown exception caught"); \
-    return false;                                                               \
-  }
-
+#  define USE_TASK_ARENA 0
 #endif
-  
-#define RTC_VERIFY_HANDLE(handle)                               \
-  if (handle == nullptr) {                                         \
-    throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"invalid argument"); \
+
+/*! Makros used in the rtcore API implementation */
+#define RTCORE_CATCH_BEGIN try {
+#define RTCORE_CATCH_END(device)                                        \
+  } catch (std::bad_alloc&) {                                            \
+    process_error(device,RTC_OUT_OF_MEMORY,"out of memory");    \
+  } catch (rtcore_error& e) {                                           \
+    process_error(device,e.error,e.what());                     \
+  } catch (std::exception& e) {                                         \
+    process_error(device,RTC_UNKNOWN_ERROR,e.what()); \
+  } catch (...) {                                                       \
+    process_error(device,RTC_UNKNOWN_ERROR,"unknown exception caught"); \
   }
 
-#define RTC_VERIFY_GEOMID(id)                                   \
+#define RTCORE_VERIFY_HANDLE(handle)                                    \
+  if (handle == nullptr) {                                              \
+    throw_RTCError(RTC_INVALID_ARGUMENT,"invalid argument");            \
+  }
+
+#define RTCORE_VERIFY_GEOMID(id)                                  \
   if (id == RTC_INVALID_GEOMETRY_ID) {                             \
-    throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"invalid argument"); \
+    throw_RTCError(RTC_INVALID_ARGUMENT,"invalid argument");       \
   }
 
-#define RTC_VERIFY_UPPER(id,upper)                              \
-  if (id > upper) {                                                \
-    throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"invalid argument"); \
-  }
-
-#define RTC_VERIFY_RANGE(id,lower,upper)	\
-  if (id < lower || id > upper)						  \
-    throw_RTCError(RTC_ERROR_INVALID_OPERATION,"argument out of bounds");
-  
 #if 0 // enable to debug print all API calls
-#define RTC_TRACE(x) std::cout << #x << std::endl;
+#define RTCORE_TRACE(x) std::cout << #x << std::endl;
 #else
-#define RTC_TRACE(x) 
+#define RTCORE_TRACE(x) 
 #endif
 
   /*! used to throw embree API errors */
@@ -111,46 +96,49 @@ namespace embree
   };
 
 #if defined(DEBUG) // only report file and line in debug mode
-  #define throw_RTCError(error,str) \
+  #define throw_RTCError(error,str)                                      \
     throw rtcore_error(error,std::string(__FILE__) + " (" + toString(__LINE__) + "): " + std::string(str));
 #else
-  #define throw_RTCError(error,str) \
+  #define throw_RTCError(error,str)                                      \
     throw rtcore_error(error,str);
 #endif
 
-#define RTC_BUILD_ARGUMENTS_HAS(settings,member) \
-  (settings.byteSize > (offsetof(RTCBuildArguments,member)+sizeof(settings.member)))
+#define RTC_BUILD_SETTINGS_HAS(settings,member)                 \
+  (settings.size > (offsetof(RTCBuildSettings,member)+sizeof(settings.member))) 
 
-  
-  inline void storeTransform(const AffineSpace3fa& space, RTCFormat format, float* xfm)
+  struct ErrorHandler
   {
-    switch (format)
+  public:
+    ErrorHandler()
+      : thread_error(createTls()) {}
+
+    ~ErrorHandler()
     {
-    case RTC_FORMAT_FLOAT3X4_ROW_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vy.x;  xfm[ 2] = space.l.vz.x;  xfm[ 3] = space.p.x;
-      xfm[ 4] = space.l.vx.y;  xfm[ 5] = space.l.vy.y;  xfm[ 6] = space.l.vz.y;  xfm[ 7] = space.p.y;
-      xfm[ 8] = space.l.vx.z;  xfm[ 9] = space.l.vy.z;  xfm[10] = space.l.vz.z;  xfm[11] = space.p.z;
-      break;
-
-    case RTC_FORMAT_FLOAT3X4_COLUMN_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vx.y;  xfm[ 2] = space.l.vx.z;
-      xfm[ 3] = space.l.vy.x;  xfm[ 4] = space.l.vy.y;  xfm[ 5] = space.l.vy.z;
-      xfm[ 6] = space.l.vz.x;  xfm[ 7] = space.l.vz.y;  xfm[ 8] = space.l.vz.z;
-      xfm[ 9] = space.p.x;     xfm[10] = space.p.y;     xfm[11] = space.p.z;
-      break;
-
-    case RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vx.y;  xfm[ 2] = space.l.vx.z;  xfm[ 3] = 0.f;
-      xfm[ 4] = space.l.vy.x;  xfm[ 5] = space.l.vy.y;  xfm[ 6] = space.l.vy.z;  xfm[ 7] = 0.f;
-      xfm[ 8] = space.l.vz.x;  xfm[ 9] = space.l.vz.y;  xfm[10] = space.l.vz.z;  xfm[11] = 0.f;
-      xfm[12] = space.p.x;     xfm[13] = space.p.y;     xfm[14] = space.p.z;     xfm[15] = 1.f;
-      break;
-
-    default:
-#if !defined(__SYCL_DEVICE_ONLY__)
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid matrix format");
-#endif
-      break;
+      Lock<MutexSys> lock(errors_mutex);
+      for (size_t i=0; i<thread_errors.size(); i++)
+        delete thread_errors[i];
+      destroyTls(thread_error);
+      thread_errors.clear();
     }
-  }
+
+    RTCError* error()
+    {
+      RTCError* stored_error = (RTCError*) getTls(thread_error);
+      if (stored_error) return stored_error;
+      
+      Lock<MutexSys> lock(errors_mutex);
+      stored_error = new RTCError(RTC_NO_ERROR);
+      thread_errors.push_back(stored_error);
+      setTls(thread_error,stored_error);
+      return stored_error;
+    }
+    
+  public:
+    tls_t thread_error;
+    std::vector<RTCError*> thread_errors;
+    MutexSys errors_mutex;
+  };
+
+
+//}
 }

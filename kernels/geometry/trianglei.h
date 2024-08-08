@@ -8,6 +8,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* Stores M triangles from an indexed face set */
   template <int M>
   struct TriangleMi
@@ -20,7 +22,7 @@ namespace embree
       size_t sizeTotal(const char* This) const;
       size_t getBytes(const char* This) const;
     };
-    static Type type;
+    static const Type& type();
 
   public:
 
@@ -435,8 +437,9 @@ namespace embree
   }
   }
 
-  template<int M>
-  typename TriangleMi<M>::Type TriangleMi<M>::type;
+  //template<int M>
+  //typename TriangleMi<M>::Type TriangleMi<M>::type;
 
   typedef TriangleMi<4> Triangle4i;
+}
 }

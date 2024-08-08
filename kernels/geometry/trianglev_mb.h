@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* Stores the vertices of M triangles in struct of array layout */
   template<int M>
   struct TriangleMvMB
@@ -20,7 +22,7 @@ namespace embree
       size_t getBytes(const char* This) const;
     };
 
-    static Type type;
+    static const Type& type();
 
   public:
 
@@ -193,8 +195,9 @@ namespace embree
     vuint<M> primIDs; // primitive ID
   };
 
-  template<int M>
-  typename TriangleMvMB<M>::Type TriangleMvMB<M>::type;
+  //template<int M>
+  //typename TriangleMvMB<M>::Type TriangleMvMB<M>::type;
 
   typedef TriangleMvMB<4> Triangle4vMB;
+}
 }

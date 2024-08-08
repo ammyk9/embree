@@ -6,6 +6,8 @@
 
 namespace embree
 {
+//namespace isa
+//{
   Stat Stat::instance; 
   
   Stat::Stat () {
@@ -126,4 +128,5 @@ namespace embree
     cout << "#user7/user3 " << 100.0f*float(cntrs.user[7])/float(cntrs.user[3]) << "%" << embree_endl;
     cout << embree_endl;
   }
+//}
 }

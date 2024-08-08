@@ -1,15 +1,25 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "device.h"
-
-#include "../../common/tasking/taskscheduler.h"
-
-#include "../hash.h"
+#include "version.h"
 #include "scene_triangle_mesh.h"
 #include "scene_user_geometry.h"
 #include "scene_instance.h"
-#include "scene_curves.h"
+#include "scene_bezier_curves.h"
 #include "scene_subdiv_mesh.h"
 
 #include "../subdiv/tessellation_cache.h"
@@ -22,78 +32,43 @@
 #include "../bvh/bvh4_factory.h"
 #include "../bvh/bvh8_factory.h"
 
+#include "../common/tasking/taskscheduler.h"
 #include "../../common/sys/alloc.h"
-
-#if defined(EMBREE_SYCL_SUPPORT)
-#  include "../level_zero/ze_wrapper.h"
-#endif
 
 namespace embree
 {
-  /*! some global variables that can be set via rtcSetParameter1i for debugging purposes */
-  ssize_t Device::debug_int0 = 0;
-  ssize_t Device::debug_int1 = 0;
-  ssize_t Device::debug_int2 = 0;
-  ssize_t Device::debug_int3 = 0;
+namespace isa
+{
+  DECLARE_SYMBOL2(RayStreamFilterFuncs,rayStreamFilterFuncs);
 
-  static MutexSys g_mutex;
-  static std::map<Device*,size_t> g_cache_size_map;
-  static std::map<Device*,size_t> g_num_threads_map;
-  
-  struct TaskArena
+  Device::Device (const State& state)
+    : State(state) 
   {
-#if USE_TASK_ARENA
-    std::unique_ptr<tbb::task_arena> arena;
-#endif
-  };
+    init();
+  }
 
-  Device::Device (const char* cfg) : arena(new TaskArena())
+  Device::Device (const char* cfg, bool singledevice)
+    : State(cfg,singledevice)
   {
-    /* check that CPU supports lowest ISA */
-    if (!hasISA(ISA)) {
-      throw_RTCError(RTC_ERROR_UNSUPPORTED_CPU,"CPU does not support " ISA_STR);
-    }
+    init();
+  }
 
-    /* set default frequency level for detected CPU */
-    switch (getCPUModel()) {
-    case CPU::UNKNOWN:         frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::XEON_ICE_LAKE:   frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_ICE_LAKE:   frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_TIGER_LAKE: frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_COMET_LAKE: frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_CANNON_LAKE:frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_KABY_LAKE:  frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::XEON_SKY_LAKE:   frequency_level = FREQUENCY_SIMD128; break;
-    case CPU::CORE_SKY_LAKE:   frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::XEON_BROADWELL:  frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_BROADWELL:  frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::XEON_HASWELL:    frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_HASWELL:    frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::XEON_IVY_BRIDGE: frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::CORE_IVY_BRIDGE: frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::SANDY_BRIDGE:    frequency_level = FREQUENCY_SIMD256; break;
-    case CPU::NEHALEM:         frequency_level = FREQUENCY_SIMD128; break;
-    case CPU::CORE2:           frequency_level = FREQUENCY_SIMD128; break;
-    case CPU::CORE1:           frequency_level = FREQUENCY_SIMD128; break;
-    case CPU::XEON_PHI_KNIGHTS_MILL   : frequency_level = FREQUENCY_SIMD512; break;
-    case CPU::XEON_PHI_KNIGHTS_LANDING: frequency_level = FREQUENCY_SIMD512; break;
-    case CPU::ARM:             frequency_level = FREQUENCY_SIMD256; break;
-    }
+  void Device::init()
+  {
+    /* check CPU */
+    if (!hasISA(ISA)) 
+      throw_RTCError(RTC_UNSUPPORTED_CPU,"CPU does not support " ISA_STR);
 
-    /* initialize global state */
-#if defined(EMBREE_CONFIG)
-    State::parseString(EMBREE_CONFIG);
-#endif
-    State::parseString(cfg);
-    State::verify();
+    error_function = nullptr;
+    error_function2 = nullptr;
+    error_function_userptr = nullptr;
 
-    /* check whether selected ISA is supported by the HW, as the user could have forced an unsupported ISA */    
-    if (!checkISASupport()) {
-      throw_RTCError(RTC_ERROR_UNSUPPORTED_CPU,"CPU does not support selected ISA");
-    }    
-    
+    memory_monitor_function = nullptr;
+    memory_monitor_function2 = nullptr;
+    memory_monitor_userptr = nullptr;
+
     /*! do some internal tests */
-    assert(isa::Cylinder::verify());
+    assert(Cylinder::verify());
 
     /*! enable huge page support if desired */
 #if defined(__WIN32__)
@@ -117,7 +92,7 @@ namespace embree
       //exceptions &= ~_MM_MASK_INEXACT;
       _MM_SET_EXCEPTION_MASK(exceptions);
     }
-    
+
     /* print info header */
     if (State::verbosity(1))
       print();
@@ -125,14 +100,23 @@ namespace embree
       State::print();
 
     /* register all algorithms */
+    instance_factory = make_unique(new InstanceFactory(enabled_cpu_features));
+
     bvh4_factory = make_unique(new BVH4Factory(enabled_builder_cpu_features, enabled_cpu_features));
 
-#if defined(EMBREE_TARGET_SIMD8)
+#if defined(__AVX__)
     bvh8_factory = make_unique(new BVH8Factory(enabled_builder_cpu_features, enabled_cpu_features));
 #endif
 
     /* setup tasking system */
     initTaskingSystem(numThreads);
+
+    /* ray stream SOA to AOS conversion */
+#if defined(EMBREE_RAY_PACKETS)
+    RayStreamFilterFuncsType rayStreamFilterFuncs;
+    SELECT_SYMBOL_DEFAULT_SSE42_AVX_AVX2_AVX512KNL_AVX512SKX(enabled_cpu_features,rayStreamFilterFuncs);
+    rayStreamFilters = rayStreamFilterFuncs();
+#endif
   }
 
   Device::~Device ()
@@ -144,20 +128,23 @@ namespace embree
   std::string getEnabledTargets()
   {
     std::string v;
-#if defined(EMBREE_TARGET_SSE2)
+#if defined(__TARGET_SSE2__)
     v += "SSE2 ";
 #endif
-#if defined(EMBREE_TARGET_SSE42)
+#if defined(__TARGET_SSE42__)
     v += "SSE4.2 ";
 #endif
-#if defined(EMBREE_TARGET_AVX)
+#if defined(__TARGET_AVX__)
     v += "AVX ";
 #endif
-#if defined(EMBREE_TARGET_AVX2)
+#if defined(__TARGET_AVX2__)
     v += "AVX2 ";
 #endif
-#if defined(EMBREE_TARGET_AVX512)
-    v += "AVX512 ";
+#if defined(__TARGET_AVX512KNL__)
+    v += "AVX512KNL ";
+#endif
+#if defined(__TARGET_AVX512SKX__)
+    v += "AVX512SKX ";
 #endif
     return v;
   }
@@ -171,17 +158,8 @@ namespace embree
 #if defined (EMBREE_BACKFACE_CULLING)
     v += "backfaceculling ";
 #endif
-#if defined (EMBREE_BACKFACE_CULLING_CURVES)
-    v += "backfacecullingcurves ";
-#endif
-#if defined (EMBREE_BACKFACE_CULLING_SPHERES)
-    v += "backfacecullingspheres ";
-#endif
-#if defined(EMBREE_FILTER_FUNCTION)
+#if defined(EMBREE_INTERSECTION_FILTER)
     v += "intersection_filter ";
-#endif
-#if defined (EMBREE_COMPACT_POLYS)
-    v += "compact_polys ";
 #endif
     return v;
   }
@@ -189,8 +167,7 @@ namespace embree
   void Device::print()
   {
     const int cpu_features = getCPUFeatures();
-    std::cout << std::endl;
-    std::cout << "Embree Ray Tracing Kernels " << RTC_VERSION_STRING << " (" << RTC_HASH << ")" << std::endl;
+    std::cout << "Embree Ray Tracing Kernels " << __EMBREE_VERSION__ << " (" << __EMBREE_HASH__ << ")" << std::endl;
     std::cout << "  Compiler  : " << getCompilerName() << std::endl;
     std::cout << "  Build     : ";
 #if defined(DEBUG)
@@ -215,11 +192,7 @@ namespace embree
     std::cout << "    Tasking : ";
 #if defined(TASKING_TBB)
     std::cout << "TBB" << TBB_VERSION_MAJOR << "." << TBB_VERSION_MINOR << " ";
-  #if TBB_INTERFACE_VERSION >= 12002
-    std::cout << "TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << TBB_runtime_interface_version() << " ";
-  #else
     std::cout << "TBB_header_interface_" << TBB_INTERFACE_VERSION << " TBB_lib_interface_" << tbb::TBB_runtime_interface_version() << " ";
-  #endif
 #endif
 #if defined(TASKING_INTERNAL)
     std::cout << "internal_tasking_system ";
@@ -229,7 +202,6 @@ namespace embree
 #endif
     std::cout << std::endl;
 
-#if defined(__X86_64__)
     /* check of FTZ and DAZ flags are set in CSR */
     if (!hasFTZ || !hasDAZ) 
     {
@@ -253,175 +225,114 @@ namespace embree
         std::cout << std::endl;
       }
     }
-#endif
     std::cout << std::endl;
   }
 
-  void Device::setDeviceErrorCode(RTCError error, std::string const& msg)
+  SceneInterface* Device::newScene (RTCSceneFlags flags, RTCAlgorithmFlags aflags) {
+    return new Scene(this,flags,aflags);
+  }
+
+  void Device::setDeviceErrorCode(RTCError error)
   {
-    RTCErrorMessage* stored_error = errorHandler.error();
-    if (stored_error->error == RTC_ERROR_NONE) {
-      stored_error->error = error;
-      if (msg != "")
-        stored_error->msg = msg;
-    }
+    RTCError* stored_error = errorHandler.error();
+    if (*stored_error == RTC_NO_ERROR)
+      *stored_error = error;
   }
 
   RTCError Device::getDeviceErrorCode()
   {
-    RTCErrorMessage* stored_error = errorHandler.error();
-    RTCErrorMessage error = *stored_error;
-    stored_error->error = RTC_ERROR_NONE;
-    return error.error;
+    RTCError* stored_error = errorHandler.error();
+    RTCError error = *stored_error;
+    *stored_error = RTC_NO_ERROR;
+    return error;
   }
 
-  const char* Device::getDeviceLastErrorMessage()
-  {
-    RTCErrorMessage* stored_error = errorHandler.error();
-    return stored_error->msg.c_str();
-  }
-
-  void Device::setThreadErrorCode(RTCError error, std::string const& msg)
-  {
-    RTCErrorMessage* stored_error = g_errorHandler.error();
-    if (stored_error->error == RTC_ERROR_NONE) {
-      stored_error->error = error;
-      if (msg != "")
-        stored_error->msg = msg;
-    }
-  }
-
-  RTCError Device::getThreadErrorCode()
-  {
-    RTCErrorMessage* stored_error = g_errorHandler.error();
-    RTCErrorMessage error = *stored_error;
-    stored_error->error = RTC_ERROR_NONE;
-    return error.error;
-  }
-
-  const char* Device::getThreadLastErrorMessage()
-  {
-    RTCErrorMessage* stored_error = g_errorHandler.error();
-    return stored_error->msg.c_str();
-  }
-
-  void Device::process_error(Device* device, RTCError error, const char* str)
-  {
-    /* store global error code when device construction failed */
-    if (!device)
-      return setThreadErrorCode(error, str ? std::string(str) : std::string());
-
+  void Device::processError(RTCError error, const char* str)
+  { 
     /* print error when in verbose mode */
-    if (device->verbosity(1))
+    if (verbosity(1)) 
     {
-      std::cerr << "Embree: " << getErrorString(error);
+      switch (error) {
+      case RTC_NO_ERROR         : std::cerr << "Embree: No error"; break;
+      case RTC_UNKNOWN_ERROR    : std::cerr << "Embree: Unknown error"; break;
+      case RTC_INVALID_ARGUMENT : std::cerr << "Embree: Invalid argument"; break;
+      case RTC_INVALID_OPERATION: std::cerr << "Embree: Invalid operation"; break;
+      case RTC_OUT_OF_MEMORY    : std::cerr << "Embree: Out of memory"; break;
+      case RTC_UNSUPPORTED_CPU  : std::cerr << "Embree: Unsupported CPU"; break;
+      default                   : std::cerr << "Embree: Invalid error code"; break;                   
+      };
       if (str) std::cerr << ", (" << str << ")";
       std::cerr << std::endl;
     }
 
     /* call user specified error callback */
-    if (device->error_function) 
-      device->error_function(device->error_function_userptr,error,str); 
+    if (error_function) 
+      error_function(error,str); 
+    if (error_function2) 
+      error_function2(error_function_userptr,error,str); 
 
     /* record error code */
-    device->setDeviceErrorCode(error, str ? std::string(str) : std::string());
+    setDeviceErrorCode(error);
   }
 
   void Device::memoryMonitor(ssize_t bytes, bool post)
   {
-    if (State::memory_monitor_function && bytes != 0) {
-      if (!State::memory_monitor_function(State::memory_monitor_userptr,bytes,post)) {
+    if (memory_monitor_function && bytes != 0) {
+      if (!memory_monitor_function(bytes,post)) {
         if (bytes > 0) { // only throw exception when we allocate memory to never throw inside a destructor
-          throw_RTCError(RTC_ERROR_OUT_OF_MEMORY,"memory monitor forced termination");
+          throw_RTCError(RTC_OUT_OF_MEMORY,"memory monitor forced termination");
+        }
+      }
+    }
+
+    if (memory_monitor_function2 && bytes != 0) {
+      if (!memory_monitor_function2(memory_monitor_userptr,bytes,post)) {
+        if (bytes > 0) { // only throw exception when we allocate memory to never throw inside a destructor
+          throw_RTCError(RTC_OUT_OF_MEMORY,"memory monitor forced termination");
         }
       }
     }
   }
-
-  size_t getMaxNumThreads()
-  {
-    size_t maxNumThreads = 0;
-    for (std::map<Device*,size_t>::iterator i=g_num_threads_map.begin(); i != g_num_threads_map.end(); i++)
-      maxNumThreads = max(maxNumThreads, (*i).second);
-    if (maxNumThreads == 0)
-      maxNumThreads = std::numeric_limits<size_t>::max();
-    return maxNumThreads;
-  }
-
-  size_t getMaxCacheSize()
-  {
-    size_t maxCacheSize = 0;
-    for (std::map<Device*,size_t>::iterator i=g_cache_size_map.begin(); i!= g_cache_size_map.end(); i++)
-      maxCacheSize = max(maxCacheSize, (*i).second);
-    return maxCacheSize;
-  }
  
   void Device::setCacheSize(size_t bytes) 
   {
-#if defined(EMBREE_GEOMETRY_SUBDIVISION)
-    Lock<MutexSys> lock(g_mutex);
-    if (bytes == 0) g_cache_size_map.erase(this);
-    else            g_cache_size_map[this] = bytes;
-    
-    size_t maxCacheSize = getMaxCacheSize();
+#if defined(EMBREE_GEOMETRY_SUBDIV)
+    DeviceInterface::setCacheSize(this,bytes);
+    size_t maxCacheSize = DeviceInterface::getMaxCacheSize();
     resizeTessellationCache(maxCacheSize);
 #endif
   }
 
   void Device::initTaskingSystem(size_t numThreads) 
   {
-    Lock<MutexSys> lock(g_mutex);
-    if (numThreads == 0) 
-      g_num_threads_map[this] = std::numeric_limits<size_t>::max();
-    else 
-      g_num_threads_map[this] = numThreads;
-
-    /* create task scheduler */
-    size_t maxNumThreads = getMaxNumThreads();
+    DeviceInterface::setNumThreads(this,numThreads);
+    size_t maxNumThreads = DeviceInterface::getMaxNumThreads();
     TaskScheduler::create(maxNumThreads,State::set_affinity,State::start_threads);
 #if USE_TASK_ARENA
-    const size_t nThreads = min(maxNumThreads,TaskScheduler::threadCount());
-    const size_t uThreads = min(max(numUserThreads,(size_t)1),nThreads);
-    arena->arena = make_unique(new tbb::task_arena((int)nThreads,(unsigned int)uThreads));
+    arena = make_unique(new tbb::task_arena((int)min(maxNumThreads,TaskScheduler::threadCount())));
 #endif
   }
 
   void Device::exitTaskingSystem() 
   {
-    Lock<MutexSys> lock(g_mutex);
-    g_num_threads_map.erase(this);
-
     /* terminate tasking system */
-    if (g_num_threads_map.size() == 0) {
+    if (DeviceInterface::unsetNumThreads(this)) {
       TaskScheduler::destroy();
     } 
     /* or configure new number of threads */
     else {
-      size_t maxNumThreads = getMaxNumThreads();
+      size_t maxNumThreads = DeviceInterface::getMaxNumThreads();
       TaskScheduler::create(maxNumThreads,State::set_affinity,State::start_threads);
     }
 #if USE_TASK_ARENA
-    arena->arena.reset();
+    arena.reset();
 #endif
   }
 
-  void Device::execute(bool join, const std::function<void()>& func)
+  void Device::setParameter1i(const RTCParameter parm, ssize_t val)
   {
-#if USE_TASK_ARENA
-    if (join) {
-      arena->arena->execute(func);
-    }
-    else
-#endif
-    {
-      func();
-    }
-  }
-
-  void Device::setProperty(const RTCDeviceProperty prop, ssize_t val)
-  {
-    /* hidden internal properties */
-    switch ((size_t)prop)
+    /* hidden internal parameters */
+    switch ((size_t)parm)
     {
     case 1000000: debug_int0 = val; return;
     case 1000001: debug_int1 = val; return;
@@ -429,348 +340,150 @@ namespace embree
     case 1000003: debug_int3 = val; return;
     }
 
-    throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown writable property");
+    switch (parm) {
+    case RTC_SOFTWARE_CACHE_SIZE: setCacheSize(val); break;
+    default: throw_RTCError(RTC_INVALID_ARGUMENT, "unknown writable parameter"); break;
+    };
   }
 
-  ssize_t Device::getProperty(const RTCDeviceProperty prop)
+  ssize_t Device::getParameter1i(const RTCParameter parm)
   {
-    size_t iprop = (size_t)prop;
+    size_t iparm = (size_t)parm;
 
     /* get name of internal regression test */
-    if (iprop >= 2000000 && iprop < 3000000)
+    if (iparm >= 2000000 && iparm < 3000000)
     {
-      RegressionTest* test = getRegressionTest(iprop-2000000);
+      RegressionTest* test = getRegressionTest(iparm-2000000);
       if (test) return (ssize_t) test->name.c_str();
       else      return 0;
     }
 
     /* run internal regression test */
-    if (iprop >= 3000000 && iprop < 4000000)
+    if (iparm >= 3000000 && iparm < 4000000)
     {
-      RegressionTest* test = getRegressionTest(iprop-3000000);
+      RegressionTest* test = getRegressionTest(iparm-3000000);
       if (test) return test->run();
       else      return 0;
     }
 
-    /* documented properties */
-    switch (prop) 
+    /* documented parameters */
+    switch (parm) 
     {
-    case RTC_DEVICE_PROPERTY_VERSION_MAJOR: return RTC_VERSION_MAJOR;
-    case RTC_DEVICE_PROPERTY_VERSION_MINOR: return RTC_VERSION_MINOR;
-    case RTC_DEVICE_PROPERTY_VERSION_PATCH: return RTC_VERSION_PATCH;
-    case RTC_DEVICE_PROPERTY_VERSION      : return RTC_VERSION;
+    case RTC_CONFIG_VERSION_MAJOR: return __EMBREE_VERSION_MAJOR__;
+    case RTC_CONFIG_VERSION_MINOR: return __EMBREE_VERSION_MINOR__;
+    case RTC_CONFIG_VERSION_PATCH: return __EMBREE_VERSION_PATCH__;
+    case RTC_CONFIG_VERSION      : return __EMBREE_VERSION_NUMBER__;
 
-#if defined(EMBREE_TARGET_SIMD4) && defined(EMBREE_RAY_PACKETS)
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY4_SUPPORTED:  return hasISA(SSE2);
+    case RTC_CONFIG_INTERSECT1: return 1;
+
+#if defined(__TARGET_SIMD4__) && defined(EMBREE_RAY_PACKETS)
+    case RTC_CONFIG_INTERSECT4:  return hasISA(SSE2);
 #else
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY4_SUPPORTED:  return 0;
+    case RTC_CONFIG_INTERSECT4:  return 0;
 #endif
 
-#if defined(EMBREE_TARGET_SIMD8) && defined(EMBREE_RAY_PACKETS)
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY8_SUPPORTED:  return hasISA(AVX);
+#if defined(__TARGET_SIMD8__) && defined(EMBREE_RAY_PACKETS)
+    case RTC_CONFIG_INTERSECT8:  return hasISA(AVX);
 #else
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY8_SUPPORTED:  return 0;
+    case RTC_CONFIG_INTERSECT8:  return 0;
 #endif
 
-#if defined(EMBREE_TARGET_SIMD16) && defined(EMBREE_RAY_PACKETS)
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY16_SUPPORTED: return hasISA(AVX512);
+#if defined(__TARGET_SIMD16__) && defined(EMBREE_RAY_PACKETS)
+    case RTC_CONFIG_INTERSECT16: return hasISA(AVX512KNL) | hasISA(AVX512SKX);
 #else
-    case RTC_DEVICE_PROPERTY_NATIVE_RAY16_SUPPORTED: return 0;
+    case RTC_CONFIG_INTERSECT16: return 0;
 #endif
 
+#if defined(EMBREE_RAY_PACKETS)
+    case RTC_CONFIG_INTERSECT_STREAM:  return 1;
+#else
+    case RTC_CONFIG_INTERSECT_STREAM:  return 0;
+#endif
+    
 #if defined(EMBREE_RAY_MASK)
-    case RTC_DEVICE_PROPERTY_RAY_MASK_SUPPORTED: return 1;
+    case RTC_CONFIG_RAY_MASK: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_RAY_MASK_SUPPORTED: return 0;
+    case RTC_CONFIG_RAY_MASK: return 0;
 #endif
 
 #if defined(EMBREE_BACKFACE_CULLING)
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_ENABLED: return 1;
+    case RTC_CONFIG_BACKFACE_CULLING: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_ENABLED: return 0;
+    case RTC_CONFIG_BACKFACE_CULLING: return 0;
 #endif
 
-#if defined(EMBREE_BACKFACE_CULLING_CURVES)
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_CURVES_ENABLED: return 1;
+#if defined(EMBREE_INTERSECTION_FILTER)
+    case RTC_CONFIG_INTERSECTION_FILTER: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_CURVES_ENABLED: return 0;
+    case RTC_CONFIG_INTERSECTION_FILTER: return 0;
 #endif
 
-#if defined(EMBREE_BACKFACE_CULLING_SPHERES)
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_SPHERES_ENABLED: return 1;
+#if defined(EMBREE_INTERSECTION_FILTER_RESTORE)
+    case RTC_CONFIG_INTERSECTION_FILTER_RESTORE: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_BACKFACE_CULLING_SPHERES_ENABLED: return 0;
-#endif
-
-#if defined(EMBREE_COMPACT_POLYS)
-    case RTC_DEVICE_PROPERTY_COMPACT_POLYS_ENABLED: return 1;
-#else
-    case RTC_DEVICE_PROPERTY_COMPACT_POLYS_ENABLED: return 0;
-#endif
-
-#if defined(EMBREE_FILTER_FUNCTION)
-    case RTC_DEVICE_PROPERTY_FILTER_FUNCTION_SUPPORTED: return 1;
-#else
-    case RTC_DEVICE_PROPERTY_FILTER_FUNCTION_SUPPORTED: return 0;
+    case RTC_CONFIG_INTERSECTION_FILTER_RESTORE: return 0;
 #endif
 
 #if defined(EMBREE_IGNORE_INVALID_RAYS)
-    case RTC_DEVICE_PROPERTY_IGNORE_INVALID_RAYS_ENABLED: return 1;
+    case RTC_CONFIG_IGNORE_INVALID_RAYS: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_IGNORE_INVALID_RAYS_ENABLED: return 0;
+    case RTC_CONFIG_IGNORE_INVALID_RAYS: return 0;
 #endif
 
 #if defined(TASKING_INTERNAL)
-    case RTC_DEVICE_PROPERTY_TASKING_SYSTEM: return 0;
+    case RTC_CONFIG_TASKING_SYSTEM: return 0;
 #endif
 
 #if defined(TASKING_TBB)
-    case RTC_DEVICE_PROPERTY_TASKING_SYSTEM: return 1;
+    case RTC_CONFIG_TASKING_SYSTEM: return 1;
 #endif
 
-#if defined(TASKING_PPL)
-    case RTC_DEVICE_PROPERTY_TASKING_SYSTEM: return 2;
-#endif
-
-#if defined(EMBREE_GEOMETRY_TRIANGLE)
-    case RTC_DEVICE_PROPERTY_TRIANGLE_GEOMETRY_SUPPORTED: return 1;
+#if defined(EMBREE_GEOMETRY_TRIANGLES)
+    case RTC_CONFIG_TRIANGLE_GEOMETRY: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_TRIANGLE_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_TRIANGLE_GEOMETRY: return 0;
 #endif
         
-#if defined(EMBREE_GEOMETRY_QUAD)
-    case RTC_DEVICE_PROPERTY_QUAD_GEOMETRY_SUPPORTED: return 1;
+#if defined(EMBREE_GEOMETRY_QUADS)
+    case RTC_CONFIG_QUAD_GEOMETRY: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_QUAD_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_QUAD_GEOMETRY: return 0;
 #endif
 
-#if defined(EMBREE_GEOMETRY_CURVE)
-    case RTC_DEVICE_PROPERTY_CURVE_GEOMETRY_SUPPORTED: return 1;
+#if defined(EMBREE_GEOMETRY_LINES)
+    case RTC_CONFIG_LINE_GEOMETRY: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_CURVE_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_LINE_GEOMETRY: return 0;
 #endif
 
-#if defined(EMBREE_GEOMETRY_SUBDIVISION)
-    case RTC_DEVICE_PROPERTY_SUBDIVISION_GEOMETRY_SUPPORTED: return 1;
+#if defined(EMBREE_GEOMETRY_HAIR)
+    case RTC_CONFIG_HAIR_GEOMETRY: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_SUBDIVISION_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_HAIR_GEOMETRY: return 0;
+#endif
+
+#if defined(EMBREE_GEOMETRY_SUBDIV)
+    case RTC_CONFIG_SUBDIV_GEOMETRY: return 1;
+#else
+    case RTC_CONFIG_SUBDIV_GEOMETRY: return 0;
 #endif
 
 #if defined(EMBREE_GEOMETRY_USER)
-    case RTC_DEVICE_PROPERTY_USER_GEOMETRY_SUPPORTED: return 1;
+    case RTC_CONFIG_USER_GEOMETRY: return 1;
 #else
-    case RTC_DEVICE_PROPERTY_USER_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_USER_GEOMETRY: return 0;
 #endif
 
-#if defined(EMBREE_GEOMETRY_POINT)
-    case RTC_DEVICE_PROPERTY_POINT_GEOMETRY_SUPPORTED: return 1;
+#if defined(TASKING_TBB) && (TBB_INTERFACE_VERSION_MAJOR < 8)
+    case RTC_CONFIG_COMMIT_JOIN: return 0;
+    case RTC_CONFIG_COMMIT_THREAD: return 0;
 #else
-    case RTC_DEVICE_PROPERTY_POINT_GEOMETRY_SUPPORTED: return 0;
+    case RTC_CONFIG_COMMIT_JOIN: return 1;
+    case RTC_CONFIG_COMMIT_THREAD: return 1;
 #endif
 
-#if defined(TASKING_PPL)
-    case RTC_DEVICE_PROPERTY_JOIN_COMMIT_SUPPORTED: return 0;
-#elif defined(TASKING_TBB) && (TBB_INTERFACE_VERSION_MAJOR < 8)
-    case RTC_DEVICE_PROPERTY_JOIN_COMMIT_SUPPORTED: return 0;
-#else
-    case RTC_DEVICE_PROPERTY_JOIN_COMMIT_SUPPORTED: return 1;
-#endif
-
-#if defined(TASKING_TBB) && TASKING_TBB_USE_TASK_ISOLATION
-    case RTC_DEVICE_PROPERTY_PARALLEL_COMMIT_SUPPORTED: return 1;
-#else
-    case RTC_DEVICE_PROPERTY_PARALLEL_COMMIT_SUPPORTED: return 0;
-#endif
-
-#if defined(EMBREE_SYCL_SUPPORT)
-    case RTC_DEVICE_PROPERTY_CPU_DEVICE:  {
-      if (!dynamic_cast<DeviceGPU*>(this))
-        return 1;
-      return 0;
-    };
-    case RTC_DEVICE_PROPERTY_SYCL_DEVICE: {
-      if (!dynamic_cast<DeviceGPU*>(this))
-        return 0;
-      return 1;
-    };
-#else
-    case RTC_DEVICE_PROPERTY_CPU_DEVICE:  return 1;
-    case RTC_DEVICE_PROPERTY_SYCL_DEVICE: return 0;
-#endif
-
-    default: throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown readable property"); break;
+    default: throw_RTCError(RTC_INVALID_ARGUMENT, "unknown readable parameter"); break;
     };
   }
-
-  void* Device::malloc(size_t size, size_t align) {
-    return alignedMalloc(size,align);
-  }
-
-  void Device::free(void* ptr) {
-    alignedFree(ptr);
-  }
-
-  const std::vector<std::string> Device::error_strings = {
-    "No Error",
-    "Unknown error",
-    "Invalid argument",
-    "Invalid operation",
-    "Out of Memory",
-    "Unsupported CPU",
-    "Build cancelled",
-    "Level Zero raytracing support missing"
-  };
-
-  const char* Device::getErrorString(RTCError error) {
-    if (error >= 0 && error < error_strings.size()) {
-      return error_strings.at(error).c_str();
-    }
-    return "Invalid error code";
-  }
-
-#if defined(EMBREE_SYCL_SUPPORT)
-
-  DeviceGPU::DeviceGPU(sycl::context sycl_context, const char* cfg)
-    : Device(cfg), gpu_context(sycl_context)
-  {
-    /* initialize ZeWrapper */
-    if (ZeWrapper::init() != ZE_RESULT_SUCCESS)
-       throw_RTCError(RTC_ERROR_UNKNOWN, "cannot initialize ZeWrapper");
-     
-    /* take first device as default device */
-    auto devices = gpu_context.get_devices();
-    if (devices.size() == 0)
-      throw_RTCError(RTC_ERROR_UNKNOWN, "SYCL context contains no device");
-    gpu_device = devices[0];
-
-    /* check if RTAS build extension is available */
-    sycl::platform platform = gpu_device.get_platform();
-    ze_driver_handle_t hDriver = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(platform);
-    
-    uint32_t count = 0;
-    std::vector<ze_driver_extension_properties_t> extensions;
-    ze_result_t result = ZeWrapper::zeDriverGetExtensionProperties(hDriver,&count,extensions.data());
-    if (result != ZE_RESULT_SUCCESS)
-      throw_RTCError(RTC_ERROR_UNKNOWN, "zeDriverGetExtensionProperties failed");
-    
-    extensions.resize(count);
-    result = ZeWrapper::zeDriverGetExtensionProperties(hDriver,&count,extensions.data());
-    if (result != ZE_RESULT_SUCCESS)
-      throw_RTCError(RTC_ERROR_UNKNOWN, "zeDriverGetExtensionProperties failed");
-
-#if defined(EMBREE_SYCL_L0_RTAS_BUILDER)
-    bool ze_rtas_builder = false;
-    for (uint32_t i=0; i<extensions.size(); i++)
-    {
-      if (strncmp("ZE_experimental_rtas_builder",extensions[i].name,sizeof(extensions[i].name)) == 0)
-        ze_rtas_builder = true;
-    }
-    if (!ze_rtas_builder)
-      throw_RTCError(RTC_ERROR_LEVEL_ZERO_RAYTRACING_SUPPORT_MISSING, "ZE_experimental_rtas_builder extension not found. Please install a recent driver. On Linux, make sure that the package intel-level-zero-gpu-raytracing is installed");
-
-    result = ZeWrapper::initRTASBuilder(hDriver,ZeWrapper::LEVEL_ZERO);
-    if (result == ZE_RESULT_ERROR_DEPENDENCY_UNAVAILABLE) {
-      throw_RTCError(RTC_ERROR_LEVEL_ZERO_RAYTRACING_SUPPORT_MISSING, "cannot load ZE_experimental_rtas_builder extension. Please install a recent driver. On Linux, make sure that the package intel-level-zero-gpu-raytracing is installed");
-    }
-    if (result != ZE_RESULT_SUCCESS)
-      throw_RTCError(RTC_ERROR_UNKNOWN, "cannot initialize ZE_experimental_rtas_builder extension");
-#else
-    ZeWrapper::initRTASBuilder(hDriver,ZeWrapper::INTERNAL);
-#endif
-
-    if (State::verbosity(1))
-    {
-      if (ZeWrapper::rtas_builder == ZeWrapper::INTERNAL)
-        std::cout << "  Internal RTAS Builder" << std::endl;
-      else
-        std::cout << "  Level Zero RTAS Builder" << std::endl;
-    }
-
-    /* check if extension library can get loaded */
-    ze_rtas_parallel_operation_exp_handle_t hParallelOperation;
-    result = ZeWrapper::zeRTASParallelOperationCreateExp(hDriver, &hParallelOperation);
-    if (result == ZE_RESULT_ERROR_DEPENDENCY_UNAVAILABLE)
-      throw_RTCError(RTC_ERROR_UNKNOWN, "Level Zero RTAS Build Extension cannot get loaded");
-    if (result == ZE_RESULT_SUCCESS)
-      ZeWrapper::zeRTASParallelOperationDestroyExp(hParallelOperation);
-
-    gpu_maxWorkGroupSize = getGPUDevice().get_info<sycl::info::device::max_work_group_size>();
-    gpu_maxComputeUnits  = getGPUDevice().get_info<sycl::info::device::max_compute_units>();    
-
-    if (State::verbosity(1))
-    {
-      sycl::platform platform = gpu_context.get_platform();
-      std::cout << "  Platform              : " << platform.get_info<sycl::info::platform::name>() << std::endl;
-      std::cout << "    Device              : " << getGPUDevice().get_info<sycl::info::device::name>() << std::endl;
-      std::cout << "    Max Work Group Size : " << gpu_maxWorkGroupSize << std::endl;
-      std::cout << "    Max Compute Units   : " << gpu_maxComputeUnits  << std::endl;
-      std::cout << std::endl;
-    }
-    
-    dispatchGlobalsPtr = zeRTASInitExp(gpu_device, gpu_context);
-  }
-
-  DeviceGPU::~DeviceGPU()
-  {
-    rthwifCleanup(this,dispatchGlobalsPtr,gpu_context);
-  }
-
-  void DeviceGPU::enter() {
-    enableUSMAllocEmbree(&gpu_context,&gpu_device);
-  }
-
-  void DeviceGPU::leave() {
-    disableUSMAllocEmbree();
-  }
-
-  void* DeviceGPU::malloc(size_t size, size_t align) {
-    return alignedSYCLMalloc(&gpu_context,&gpu_device,size,align,EMBREE_USM_SHARED_DEVICE_READ_ONLY);
-  }
-
-  void DeviceGPU::free(void* ptr) {
-    alignedSYCLFree(&gpu_context,ptr);
-  }
-
-  void DeviceGPU::setSYCLDevice(const sycl::device sycl_device_in) {
-    gpu_device = sycl_device_in;
-  }
-  
-#endif
-
-  DeviceEnterLeave::DeviceEnterLeave (RTCDevice hdevice)
-    : device((Device*)hdevice)
-  {
-    assert(device);
-    device->refInc();
-    device->enter();
-  }
-  
-  DeviceEnterLeave::DeviceEnterLeave (RTCScene hscene)
-    : device(((Scene*)hscene)->device)
-  {
-    assert(device);
-    device->refInc();
-    device->enter();
-  }
-  
-  DeviceEnterLeave::DeviceEnterLeave (RTCGeometry hgeometry)
-    : device(((Geometry*)hgeometry)->device)
-  {
-    assert(device);
-    device->refInc();
-    device->enter();
-  }
-  
-  DeviceEnterLeave::DeviceEnterLeave (RTCBuffer hbuffer)
-    : device(((Buffer*)hbuffer)->device)
-  {
-    assert(device);
-    device->refInc();
-    device->enter();
-  }
-  
-  DeviceEnterLeave::~DeviceEnterLeave() {
-    device->leave();
-    device->refDec();
-  }
+}
 }

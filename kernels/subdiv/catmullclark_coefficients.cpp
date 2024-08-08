@@ -3,9 +3,10 @@
 
 #include "catmullclark_coefficients.h"
 
-
 namespace embree
 {
+//namespace isa
+//{
   CatmullClarkPrecomputedCoefficients CatmullClarkPrecomputedCoefficients::table;
 
   CatmullClarkPrecomputedCoefficients::CatmullClarkPrecomputedCoefficients()
@@ -38,4 +39,5 @@ namespace embree
       delete [] table_limittangent_b[n];
     }
   }
+//}
 }

@@ -1,5 +1,5 @@
 // ======================================================================== //
-// Copyright 2009-2011 Intel Corporation                                    //
+// Copyright 2009-2017 Intel Corporation                                    //
 //                                                                          //
 // Licensed under the Apache License, Version 2.0 (the "License");          //
 // you may not use this file except in compliance with the License.         //
@@ -14,31 +14,46 @@
 // limitations under the License.                                           //
 // ======================================================================== //
 
-#ifndef __EMBREE_BVH4_INTERSECTOR_WATERTIGHT_H__
-#define __EMBREE_BVH4_INTERSECTOR_WATERTIGHT_H__
+#pragma once
 
-#include "bvh4.h"
-#include "../common/intersector.h"
+#include "../geometry/primitive.h"
+#include "../subdiv/subdivpatch1base.h"
 
 namespace embree
 {
-  /*! BVH4 Traverser. Single ray traversal implementation for a Quad BVH. */
-  template<typename TriangleIntersector>
-  class BVH4IntersectorWatertight : public Intersector
+namespace isa
+{
+  struct __aligned(64) SubdivPatch1Cached : public SubdivPatch1Base
   {
-    /* shortcuts for frequently used types */
-    typedef typename TriangleIntersector::Triangle Triangle;
-    typedef typename BVH4::Base Base;
-    typedef typename BVH4::Node Node;
+    struct Type : public PrimitiveType 
+    {
+      Type ();
+      size_t size(const char* This) const;
+    };
     
-  public:
-    BVH4IntersectorWatertight (const Ref<BVH4>& bvh) : bvh(bvh) {}
-    void intersect(const Ray& ray, Hit& hit) const;
-    bool occluded (const Ray& ray) const;
+    static const Type& type();
 
-  private:
-    Ref<BVH4> bvh;
+    struct TypeCached : public PrimitiveType 
+    {
+      TypeCached ();
+      size_t size(const char* This) const;
+    };
+    
+    static const TypeCached& type_cached();
+
+  public:
+
+    /*! constructor for cached subdiv patch */
+    SubdivPatch1Cached (const unsigned int gID,
+                        const unsigned int pID,
+                        const unsigned int subPatch,
+                        const SubdivMesh *const mesh,
+                        const size_t time,
+                        const Vec2f uv[4],
+                        const float edge_level[4],
+                        const int subdiv[4],
+                        const int simd_width) 
+      : SubdivPatch1Base(gID,pID,subPatch,mesh,time,uv,edge_level,subdiv,simd_width) {}
   };
 }
-
-#endif
+}

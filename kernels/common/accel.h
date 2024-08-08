@@ -10,6 +10,9 @@
 
 namespace embree
 {
+namespace isa
+{
+
   class Scene;
 
   /*! Base class for the acceleration structure data. */
@@ -471,4 +474,5 @@ namespace embree
                                 (Accel::OccludedFunc16)intersector::occluded,   \
                                 TOSTRING(isa) "::" TOSTRING(symbol));           \
   }
+}
 }

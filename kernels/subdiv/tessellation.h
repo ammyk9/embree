@@ -5,6 +5,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* adjust discret tessellation level for feature-adaptive pre-subdivision */
   __forceinline float adjustTessellationLevel(float l, const size_t sublevel)
   {
@@ -158,4 +160,5 @@ namespace embree
     }       
 #endif
   } 
+}
 }

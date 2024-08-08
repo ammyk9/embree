@@ -8,6 +8,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! Quad Mesh */
   struct QuadMesh : public Geometry
   {
@@ -373,4 +375,5 @@ namespace embree
   }
 
   DECLARE_ISA_FUNCTION(QuadMesh*, createQuadMesh, Device*);
+}
 }

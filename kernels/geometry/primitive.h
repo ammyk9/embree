@@ -11,6 +11,8 @@
 
 namespace embree
 {
+namespace isa
+{
   struct PrimitiveType
   {
     /*! returns name of this primitive type */
@@ -46,4 +48,5 @@ namespace embree
     
     static __forceinline void pointQueryNoop(PointQuery* query, PointQueryContext* context, const Primitive& prim) { }
   };
+}
 }

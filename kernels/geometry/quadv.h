@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* Stores the vertices of M quads in struct of array layout */
   template <int M>
   struct QuadMv
@@ -19,7 +21,7 @@ namespace embree
       size_t sizeTotal(const char* This) const;
       size_t getBytes(const char* This) const;
     };
-    static Type type;
+    static const Type& type();
 
   public:
 
@@ -158,8 +160,9 @@ namespace embree
     vuint<M> primIDs; // primitive ID
   };
 
-  template<int M>
-  typename QuadMv<M>::Type QuadMv<M>::type;
+  //template<int M>
+  //typename QuadMv<M>::Type QuadMv<M>::type;
 
   typedef QuadMv<4> Quad4v;
+}
 }

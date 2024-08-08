@@ -1,2084 +1,1831 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
-#define RTC_EXPORT_API
+/*#ifdef _WIN32
+#  define RTCORE_API extern "C" __declspec(dllexport)
+#else
+#  define RTCORE_API extern "C" __attribute__ ((visibility ("default")))
+#endif*/
+#define RTCORE_API
 
 #include "default.h"
 #include "device.h"
 #include "scene.h"
 #include "context.h"
-#include "../geometry/filter.h"
-#include "../../include/embree4/rtcore_ray.h"
-using namespace embree;
+#include "../../include/embree2/rtcore_ray.h"
 
-RTC_NAMESPACE_BEGIN;
+namespace embree
+{
+  extern MutexSys g_api_mutex;
 
-#define RTC_ENTER_DEVICE(arg) \
-  DeviceEnterLeave enterleave(arg);
+  void setThreadErrorCode(RTCError error);
+  RTCError getThreadErrorCode();
+  void process_error(DeviceInterface* device, RTCError error, const char* str);
 
-  /* mutex to make API thread safe */
-  static MutexSys g_mutex;
+namespace isa
+{
+  RTCORE_API DeviceInterface* createDevice(const State& state) {
+    return new Device(state);
+  }
 
-  RTC_API RTCDevice rtcNewDevice(const char* config)
+#if 0
+  RTCORE_API RTCDevice rtcNewDevice(const char* cfg)
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewDevice);
-    Lock<MutexSys> lock(g_mutex);
-    Device* device = new Device(config);
-    return (RTCDevice) device->refInc();
-    RTC_CATCH_END(nullptr);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewDevice);
+    Lock<MutexSys> lock(g_api_mutex);
+    return (RTCDevice) new Device(cfg,false);
+    RTCORE_CATCH_END(nullptr);
     return (RTCDevice) nullptr;
   }
 
-#if defined(EMBREE_SYCL_SUPPORT)
-
-  RTC_API RTCDevice rtcNewSYCLDeviceInternal(sycl::context sycl_context, const char* config)
+  RTCORE_API void rtcDeleteDevice(RTCDevice device) 
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewSYCLDevice);
-    Lock<MutexSys> lock(g_mutex);
-
-    DeviceGPU* device = new DeviceGPU(sycl_context,config);
-    return (RTCDevice) device->refInc();
-    RTC_CATCH_END(nullptr);
-    return (RTCDevice) nullptr;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeleteDevice);
+    RTCORE_VERIFY_HANDLE(device);
+    Lock<MutexSys> lock(g_api_mutex);
+    delete (Device*) device;
+    RTCORE_CATCH_END(nullptr);
   }
 
-  RTC_API bool rtcIsSYCLDeviceSupported(const sycl::device device)
+  /* global device for compatibility with old rtcInit / rtcExit scheme */
+  static Device* g_device = nullptr;
+
+  RTCORE_API void rtcInit(const char* cfg) 
   {
-    try {
-      RTC_TRACE(rtcIsSYCLDeviceSupported);
-      return rthwifIsSYCLDeviceSupported(device) > 0;
-    } catch (...) {
-      return false;
-    }
-    return false;
-  }
-
-  RTC_API int rtcSYCLDeviceSelector(const sycl::device device)
-  {
-    try {
-      RTC_TRACE(rtcSYCLDeviceSelector);
-      return rthwifIsSYCLDeviceSupported(device);
-    } catch (...) {
-      return -1;
-    }
-    return -1;
-  }
-
-  RTC_API void rtcSetDeviceSYCLDevice(RTCDevice hdevice, const sycl::device sycl_device)
-  {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetDeviceSYCLDevice);
-    RTC_VERIFY_HANDLE(hdevice);
-
-    Lock<MutexSys> lock(g_mutex);
-    
-    DeviceGPU* device = dynamic_cast<DeviceGPU*>((Device*) hdevice);
-    if (device == nullptr)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "passed device must be an Embree SYCL device")
-      
-    device->setSYCLDevice(sycl_device);
-    
-    RTC_CATCH_END(nullptr);
-  }
-
-#endif
-
-  RTC_API void rtcRetainDevice(RTCDevice hdevice) 
-  {
-    Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcRetainDevice);
-    RTC_VERIFY_HANDLE(hdevice);
-    Lock<MutexSys> lock(g_mutex);
-    device->refInc();
-    RTC_CATCH_END(nullptr);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcInit);
+    Lock<MutexSys> lock(g_api_mutex);
+    if (g_device) throw_RTCError(RTC_INVALID_OPERATION,"already initialized");
+    g_device = new Device(cfg,true);
+    RTCORE_CATCH_END(g_device);
   }
   
-  RTC_API void rtcReleaseDevice(RTCDevice hdevice) 
+  RTCORE_API void rtcExit() 
   {
-    Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcReleaseDevice);
-    RTC_VERIFY_HANDLE(hdevice);
-    Lock<MutexSys> lock(g_mutex);
-    device->refDec();
-    RTC_CATCH_END(nullptr);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcExit);
+    Lock<MutexSys> lock(g_api_mutex);
+    if (!g_device) throw_RTCError(RTC_INVALID_OPERATION,"rtcInit has to get called before rtcExit");
+    delete g_device; g_device = nullptr;
+    RTCORE_CATCH_END(g_device);
   }
-  
-  RTC_API ssize_t rtcGetDeviceProperty(RTCDevice hdevice, RTCDeviceProperty prop)
+
+  RTCORE_API void rtcSetParameter1i(const RTCParameter parm, ssize_t val)
   {
-    Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetDeviceProperty);
-    RTC_VERIFY_HANDLE(hdevice);
-    Lock<MutexSys> lock(g_mutex);
-    return device->getProperty(prop);
-    RTC_CATCH_END(device);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetParameter1i);
+    Lock<MutexSys> lock(g_api_mutex);
+    if (g_device) g_device->setParameter1i(parm,val);
+    RTCORE_CATCH_END(g_device);
+  }
+
+  RTCORE_API ssize_t rtcGetParameter1i(const RTCParameter parm)
+  {
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcGetParameter1i);
+    assert(g_device);
+    Lock<MutexSys> lock(g_api_mutex);
+    return g_device->getParameter1i(parm);
+    RTCORE_CATCH_END(g_device);
     return 0;
   }
 
-  RTC_API void rtcSetDeviceProperty(RTCDevice hdevice, const RTCDeviceProperty prop, ssize_t val)
+  RTCORE_API void rtcDeviceSetParameter1i(RTCDevice hdevice, const RTCParameter parm, ssize_t val)
   {
     Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetDeviceProperty);
-    const bool internal_prop = (size_t)prop >= 1000000 && (size_t)prop < 1000004;
-    if (!internal_prop) RTC_VERIFY_HANDLE(hdevice); // allow NULL device for special internal settings
-    Lock<MutexSys> lock(g_mutex);
-    device->setProperty(prop,val);
-    RTC_CATCH_END(device);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceSetParameter1i);
+    const bool internal_parm = (size_t)parm >= 1000000 && (size_t)parm < 1000004;
+    if (!internal_parm) RTCORE_VERIFY_HANDLE(hdevice); // allow NULL device for special internal settings
+    Lock<MutexSys> lock(g_api_mutex);
+    device->setParameter1i(parm,val);
+    RTCORE_CATCH_END(device);
   }
 
-  RTC_API RTCError rtcGetDeviceError(RTCDevice hdevice)
+  RTCORE_API ssize_t rtcDeviceGetParameter1i(RTCDevice hdevice, const RTCParameter parm)
   {
     Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetDeviceError);
-    if (device == nullptr) return Device::getThreadErrorCode();
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceGetParameter1i);
+    RTCORE_VERIFY_HANDLE(hdevice);
+    Lock<MutexSys> lock(g_api_mutex);
+    return device->getParameter1i(parm);
+    RTCORE_CATCH_END(device);
+    return 0;
+  }
+
+  RTCORE_API RTCError rtcGetError()
+  {
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcGetError);
+    if (g_device == nullptr) return getThreadErrorCode();
+    else                     return g_device->getDeviceErrorCode();
+    RTCORE_CATCH_END(g_device);
+    return RTC_UNKNOWN_ERROR;
+  }
+
+  RTCORE_API RTCError rtcDeviceGetError(RTCDevice hdevice)
+  {
+    Device* device = (Device*) hdevice;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceGetError);
+    if (device == nullptr) return getThreadErrorCode();
     else                   return device->getDeviceErrorCode();
-    RTC_CATCH_END(device);
-    return RTC_ERROR_UNKNOWN;
+    RTCORE_CATCH_END(device);
+    return RTC_UNKNOWN_ERROR;
   }
 
-  RTC_API const char* rtcGetDeviceLastErrorMessage(RTCDevice hdevice)
+  RTCORE_API void rtcSetErrorFunction(RTCErrorFunc func) 
+  {
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetErrorFunction);
+    assert(g_device);
+    if (g_device) g_device->setErrorFunction(func);
+    RTCORE_CATCH_END(g_device);
+  }
+
+  RTCORE_API void rtcDeviceSetErrorFunction(RTCDevice hdevice, RTCErrorFunc func) 
   {
     Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetDeviceLastErrorMessage);
-    if (device == nullptr) return Device::getThreadLastErrorMessage();
-    else                   return device->getDeviceLastErrorMessage();
-    RTC_CATCH_END(device);
-    return "";
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceSetErrorFunction);
+    RTCORE_VERIFY_HANDLE(hdevice);
+    device->setErrorFunction(func);
+    RTCORE_CATCH_END(device);
   }
 
-  RTC_API void rtcSetDeviceErrorFunction(RTCDevice hdevice, RTCErrorFunction error, void* userPtr)
+  RTCORE_API void rtcDeviceSetErrorFunction2(RTCDevice hdevice, RTCErrorFunc2 func, void* userPtr) 
   {
     Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetDeviceErrorFunction);
-    RTC_VERIFY_HANDLE(hdevice);
-    device->setErrorFunction(error, userPtr);
-    RTC_CATCH_END(device);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceSetErrorFunction2);
+    RTCORE_VERIFY_HANDLE(hdevice);
+    device->setErrorFunction(func,userPtr);
+    RTCORE_CATCH_END(device);
   }
 
-  RTC_API void rtcSetDeviceMemoryMonitorFunction(RTCDevice hdevice, RTCMemoryMonitorFunction memoryMonitor, void* userPtr)
+  RTCORE_API void rtcSetMemoryMonitorFunction(RTCMemoryMonitorFunc func) 
+  {
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetMemoryMonitorFunction);
+    assert(g_device);
+    if (g_device) g_device->setMemoryMonitorFunction(func);
+    RTCORE_CATCH_END(g_device);
+  }
+
+  RTCORE_API void rtcDeviceSetMemoryMonitorFunction(RTCDevice hdevice, RTCMemoryMonitorFunc func) 
   {
     Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetDeviceMemoryMonitorFunction);
-    device->setMemoryMonitorFunction(memoryMonitor, userPtr);
-    RTC_CATCH_END(device);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceSetMemoryMonitorFunction);
+    device->setMemoryMonitorFunction(func);
+    RTCORE_CATCH_END(device);
   }
 
-  RTC_API RTCBuffer rtcNewBuffer(RTCDevice hdevice, size_t byteSize)
+  RTCORE_API void rtcDeviceSetMemoryMonitorFunction2(RTCDevice hdevice, RTCMemoryMonitorFunc2 func, void* userPtr) 
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewBuffer);
-    RTC_VERIFY_HANDLE(hdevice);
-    RTC_ENTER_DEVICE(hdevice);
-    Buffer* buffer = new Buffer((Device*)hdevice, byteSize);
-    return (RTCBuffer)buffer->refInc();
-    RTC_CATCH_END((Device*)hdevice);
-    return nullptr;
+    Device* device = (Device*) hdevice;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceSetMemoryMonitorFunction2);
+    device->setMemoryMonitorFunction(func,userPtr);
+    RTCORE_CATCH_END(device);
   }
 
-  RTC_API RTCBuffer rtcNewSharedBuffer(RTCDevice hdevice, void* ptr, size_t byteSize)
+  RTCORE_API void rtcDebug() 
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewSharedBuffer);
-    RTC_VERIFY_HANDLE(hdevice);
-    RTC_ENTER_DEVICE(hdevice);
-    Buffer* buffer = new Buffer((Device*)hdevice, byteSize, ptr);
-    return (RTCBuffer)buffer->refInc();
-    RTC_CATCH_END((Device*)hdevice);
-    return nullptr;
-  }
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDebug);
 
-  RTC_API void* rtcGetBufferData(RTCBuffer hbuffer)
-  {
-    Buffer* buffer = (Buffer*)hbuffer;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetBufferData);
-    RTC_VERIFY_HANDLE(hbuffer);
-    RTC_ENTER_DEVICE(hbuffer);
-    return buffer->data();
-    RTC_CATCH_END2(buffer);
-    return nullptr;
-  }
-
-  RTC_API void rtcRetainBuffer(RTCBuffer hbuffer)
-  {
-    Buffer* buffer = (Buffer*)hbuffer;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcRetainBuffer);
-    RTC_VERIFY_HANDLE(hbuffer);
-    RTC_ENTER_DEVICE(hbuffer);
-    buffer->refInc();
-    RTC_CATCH_END2(buffer);
-  }
-  
-  RTC_API void rtcReleaseBuffer(RTCBuffer hbuffer)
-  {
-    Buffer* buffer = (Buffer*)hbuffer;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcReleaseBuffer);
-    RTC_VERIFY_HANDLE(hbuffer);
-    RTC_ENTER_DEVICE(hbuffer);
-    buffer->refDec();
-    RTC_CATCH_END2(buffer);
-  }
-
-  RTC_API RTCScene rtcNewScene (RTCDevice hdevice) 
-  {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewScene);
-    RTC_VERIFY_HANDLE(hdevice);
-    RTC_ENTER_DEVICE(hdevice);
-    Scene* scene = new Scene((Device*)hdevice);
-    return (RTCScene) scene->refInc();
-    RTC_CATCH_END((Device*)hdevice);
-    return nullptr;
-  }
-
-  RTC_API RTCDevice rtcGetSceneDevice(RTCScene hscene)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetSceneDevice);
-    RTC_VERIFY_HANDLE(hscene);
-    return (RTCDevice)scene->device->refInc(); // user will own one additional device reference
-    RTC_CATCH_END2(scene);
-    return (RTCDevice)nullptr;
-  }
-
-  RTC_API void rtcSetSceneProgressMonitorFunction(RTCScene hscene, RTCProgressMonitorFunction progress, void* ptr) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetSceneProgressMonitorFunction);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    Lock<MutexSys> lock(g_mutex);
-    scene->setProgressMonitorFunction(progress,ptr);
-    RTC_CATCH_END2(scene);
-  }
-
-  RTC_API void rtcSetSceneBuildQuality (RTCScene hscene, RTCBuildQuality quality) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetSceneBuildQuality);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    if (quality != RTC_BUILD_QUALITY_LOW &&
-        quality != RTC_BUILD_QUALITY_MEDIUM &&
-        quality != RTC_BUILD_QUALITY_HIGH)
-      throw std::runtime_error("invalid build quality");
-    scene->setBuildQuality(quality);
-    RTC_CATCH_END2(scene);
-  }
-
-  RTC_API void rtcSetSceneFlags (RTCScene hscene, RTCSceneFlags flags) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetSceneFlags);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    scene->setSceneFlags(flags);
-    RTC_CATCH_END2(scene);
-  }
-
-  RTC_API RTCSceneFlags rtcGetSceneFlags(RTCScene hscene)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetSceneFlags);
-    RTC_VERIFY_HANDLE(hscene);
-    //RTC_ENTER_DEVICE(hscene);
-    return scene->getSceneFlags();
-    RTC_CATCH_END2(scene);
-    return RTC_SCENE_FLAG_NONE;
-  }
-
-  RTC_API_EXTERN_C bool prefetchUSMSharedOnGPU(RTCScene scene);
-
-  RTC_API void rtcCommitScene (RTCScene hscene)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcCommitScene);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    scene->commit(false);
-
-#if defined(EMBREE_SYCL_SUPPORT)
-    prefetchUSMSharedOnGPU(hscene);
+#if defined(EMBREE_STAT_COUNTERS)
+    Stat::print(std::cout);
+    Stat::clear();
 #endif
 
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_END(g_device);
   }
 
-  RTC_API void rtcJoinCommitScene (RTCScene hscene) 
+  RTCORE_API RTCScene rtcNewScene (RTCSceneFlags flags, RTCAlgorithmFlags aflags) 
   {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcJoinCommitScene);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    scene->commit(true);
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewScene);
+    assert(g_device);
+    if (!isCoherent(flags) && !isIncoherent(flags)) flags = RTCSceneFlags(flags | RTC_SCENE_INCOHERENT);
+    return (RTCScene) new Scene(g_device,flags,aflags);
+    RTCORE_CATCH_END(g_device);
+    return nullptr;
   }
 
-  RTC_API void rtcGetSceneBounds(RTCScene hscene, RTCBounds* bounds_o)
+  RTCORE_API RTCScene rtcDeviceNewScene (RTCDevice device, RTCSceneFlags flags, RTCAlgorithmFlags aflags) 
+  {
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeviceNewScene);
+    RTCORE_VERIFY_HANDLE(device);
+    if (!isCoherent(flags) && !isIncoherent(flags)) flags = RTCSceneFlags(flags | RTC_SCENE_INCOHERENT);
+    return (RTCScene) new Scene((Device*)device,flags,aflags);
+    RTCORE_CATCH_END((Device*)device);
+    return nullptr;
+  }
+
+  RTCORE_API void rtcSetProgressMonitorFunction(RTCScene hscene, RTCProgressMonitorFunc func, void* ptr) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetSceneBounds);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetProgressMonitorFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    Lock<MutexSys> lock(g_api_mutex);
+    scene->setProgressMonitorFunction(func,ptr);
+    RTCORE_CATCH_END(scene->device);
+  }
+  
+  RTCORE_API void rtcCommit (RTCScene hscene) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcCommit);
+    RTCORE_VERIFY_HANDLE(hscene);
+    scene->commit(0,0,true);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcCommitJoin (RTCScene hscene) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcCommitJoin);
+    RTCORE_VERIFY_HANDLE(hscene);
+    scene->commit(0,0,false);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcCommitThread(RTCScene hscene, unsigned int threadID, unsigned int numThreads) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcCommitThread);
+    RTCORE_VERIFY_HANDLE(hscene);
+
+    if (unlikely(numThreads == 0)) 
+      throw_RTCError(RTC_INVALID_OPERATION,"invalid number of threads specified");
+
+    /* for best performance set FTZ and DAZ flags in the MXCSR control and status register */
+    unsigned int mxcsr = _mm_getcsr();
+    _mm_setcsr(mxcsr | /* FTZ */ (1<<15) | /* DAZ */ (1<<6));
+    
+    /* perform scene build */
+    scene->commit(threadID,numThreads,false);
+
+    /* reset MXCSR register again */
+    _mm_setcsr(mxcsr);
+    
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcGetBounds(RTCScene hscene, RTCBounds& bounds_o)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcGetBounds);
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
     BBox3fa bounds = scene->bounds.bounds();
-    bounds_o->lower_x = bounds.lower.x;
-    bounds_o->lower_y = bounds.lower.y;
-    bounds_o->lower_z = bounds.lower.z;
-    bounds_o->align0  = 0;
-    bounds_o->upper_x = bounds.upper.x;
-    bounds_o->upper_y = bounds.upper.y;
-    bounds_o->upper_z = bounds.upper.z;
-    bounds_o->align1  = 0;
-    RTC_CATCH_END2(scene);
+    bounds_o.lower_x = bounds.lower.x;
+    bounds_o.lower_y = bounds.lower.y;
+    bounds_o.lower_z = bounds.lower.z;
+    bounds_o.align0  = 0;
+    bounds_o.upper_x = bounds.upper.x;
+    bounds_o.upper_y = bounds.upper.y;
+    bounds_o.upper_z = bounds.upper.z;
+    bounds_o.align1  = 0;
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcGetSceneLinearBounds(RTCScene hscene, RTCLinearBounds* bounds_o)
+  RTCORE_API void rtcGetLinearBounds(RTCScene hscene, RTCBounds* bounds_o)
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetSceneBounds);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    if (bounds_o == nullptr)
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"invalid destination pointer");
-    if (scene->isModified())
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    
-    bounds_o->bounds0.lower_x = scene->bounds.bounds0.lower.x;
-    bounds_o->bounds0.lower_y = scene->bounds.bounds0.lower.y;
-    bounds_o->bounds0.lower_z = scene->bounds.bounds0.lower.z;
-    bounds_o->bounds0.align0  = 0;
-    bounds_o->bounds0.upper_x = scene->bounds.bounds0.upper.x;
-    bounds_o->bounds0.upper_y = scene->bounds.bounds0.upper.y;
-    bounds_o->bounds0.upper_z = scene->bounds.bounds0.upper.z;
-    bounds_o->bounds0.align1  = 0;
-    bounds_o->bounds1.lower_x = scene->bounds.bounds1.lower.x;
-    bounds_o->bounds1.lower_y = scene->bounds.bounds1.lower.y;
-    bounds_o->bounds1.lower_z = scene->bounds.bounds1.lower.z;
-    bounds_o->bounds1.align0  = 0;
-    bounds_o->bounds1.upper_x = scene->bounds.bounds1.upper.x;
-    bounds_o->bounds1.upper_y = scene->bounds.bounds1.upper.y;
-    bounds_o->bounds1.upper_z = scene->bounds.bounds1.upper.z;
-    bounds_o->bounds1.align1  = 0;
-    RTC_CATCH_END2(scene);
-  }
-
-  RTC_API void rtcCollide (RTCScene hscene0, RTCScene hscene1, RTCCollideFunc callback, void* userPtr)
-  {
-    Scene* scene0 = (Scene*) hscene0;
-    Scene* scene1 = (Scene*) hscene1;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcCollide);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene0);
-    RTC_VERIFY_HANDLE(hscene1);
-    if (scene0->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (scene1->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (scene0->device != scene1->device) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scenes are from different devices");
-    auto nUserPrims0 = scene0->getNumPrimitives (Geometry::MTY_USER_GEOMETRY, false);
-    auto nUserPrims1 = scene1->getNumPrimitives (Geometry::MTY_USER_GEOMETRY, false);
-    if (scene0->numPrimitives() != nUserPrims0 && scene1->numPrimitives() != nUserPrims1) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scenes must only contain user geometries with a single timestep");
-#endif
-    scene0->intersectors.collide(scene0,scene1,callback,userPtr);
-    RTC_CATCH_END(scene0->device);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcGetBounds);
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    bounds_o[0].lower_x = scene->bounds.bounds0.lower.x;
+    bounds_o[0].lower_y = scene->bounds.bounds0.lower.y;
+    bounds_o[0].lower_z = scene->bounds.bounds0.lower.z;
+    bounds_o[0].align0  = 0;
+    bounds_o[0].upper_x = scene->bounds.bounds0.upper.x;
+    bounds_o[0].upper_y = scene->bounds.bounds0.upper.y;
+    bounds_o[0].upper_z = scene->bounds.bounds0.upper.z;
+    bounds_o[0].align1  = 0;
+    bounds_o[1].lower_x = scene->bounds.bounds1.lower.x;
+    bounds_o[1].lower_y = scene->bounds.bounds1.lower.y;
+    bounds_o[1].lower_z = scene->bounds.bounds1.lower.z;
+    bounds_o[1].align0  = 0;
+    bounds_o[1].upper_x = scene->bounds.bounds1.upper.x;
+    bounds_o[1].upper_y = scene->bounds.bounds1.upper.y;
+    bounds_o[1].upper_z = scene->bounds.bounds1.upper.z;
+    bounds_o[1].align1  = 0;
+    RTCORE_CATCH_END(scene->device);
   }
   
-  inline bool pointQuery(Scene* scene, RTCPointQuery* query, RTCPointQueryContext* userContext, RTCPointQueryFunction queryFunc, void* userPtr)
-  {
-    bool changed = false;
-    if (userContext->instStackSize > 0)
-    {
-      const AffineSpace3fa transform = AffineSpace3fa_load_unaligned((AffineSpace3fa*)userContext->world2inst[userContext->instStackSize-1]);
-
-      float similarityScale = 0.f;
-      const bool similtude = similarityTransform(transform, &similarityScale);
-      assert((similtude && similarityScale > 0) || (!similtude && similarityScale == 0.f));
-
-      PointQuery query_inst;
-      query_inst.p = xfmPoint(transform, Vec3fa(query->x, query->y, query->z)); 
-      query_inst.radius = query->radius * similarityScale;
-      query_inst.time = query->time;
-      
-      PointQueryContext context_inst(scene, (PointQuery*)query,
-        similtude ? POINT_QUERY_TYPE_SPHERE : POINT_QUERY_TYPE_AABB,
-        queryFunc, userContext, similarityScale, userPtr);
-      changed = scene->intersectors.pointQuery((PointQuery*)&query_inst, &context_inst);
-    }
-    else
-    {
-      PointQueryContext context(scene, (PointQuery*)query, 
-        POINT_QUERY_TYPE_SPHERE, queryFunc, userContext, 1.f, userPtr);
-      changed = scene->intersectors.pointQuery((PointQuery*)query, &context);
-    }
-    return changed;
-  }
-
-  RTC_API bool rtcPointQuery(RTCScene hscene, RTCPointQuery* query, RTCPointQueryContext* userContext, RTCPointQueryFunction queryFunc, void* userPtr)
+  RTCORE_API void rtcIntersect (RTCScene hscene, RTCRay& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcPointQuery);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect);
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_HANDLE(userContext);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)query) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "query not aligned to 16 bytes");   
-    if (((size_t)userContext) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "context not aligned to 16 bytes");   
-#endif
-
-    return pointQuery(scene, query, userContext, queryFunc, userPtr);
-    RTC_CATCH_END2_FALSE(scene);
-  }
-  
-  RTC_API bool rtcPointQuery4 (const int* valid, RTCScene hscene, RTCPointQuery4* query, struct RTCPointQueryContext* userContext, RTCPointQueryFunction queryFunc, void** userPtrN)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcPointQuery4);
-
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)query) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "query not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(point_query.travs,cnt,cnt,cnt);
-
-    bool changed = false;
-    PointQuery4* query4 = (PointQuery4*)query;
-    PointQuery query1; 
-    for (size_t i=0; i<4; i++) {
-      if (!valid[i]) continue;
-      query4->get(i,query1);
-      changed |= pointQuery(scene, (RTCPointQuery*)&query1, userContext, queryFunc, userPtrN?userPtrN[i]:NULL);
-      query4->set(i,query1);
-    }
-    return changed;
-    RTC_CATCH_END2_FALSE(scene);
-  }
-  
-  RTC_API bool rtcPointQuery8 (const int* valid, RTCScene hscene, RTCPointQuery8* query, struct RTCPointQueryContext* userContext, RTCPointQueryFunction queryFunc, void** userPtrN)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcPointQuery8);
-    
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)query) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "query not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(point_query.travs,cnt,cnt,cnt);
-
-    bool changed = false;
-    PointQuery8* query8 = (PointQuery8*)query;
-    PointQuery query1; 
-    for (size_t i=0; i<8; i++) {
-      if (!valid[i]) continue;
-      query8->get(i,query1);
-      changed |= pointQuery(scene, (RTCPointQuery*)&query1, userContext, queryFunc, userPtrN?userPtrN[i]:NULL);
-      query8->set(i,query1);
-    }
-    return changed;
-    RTC_CATCH_END2_FALSE(scene);
-  }
-
-  RTC_API bool rtcPointQuery16 (const int* valid, RTCScene hscene, RTCPointQuery16* query, struct RTCPointQueryContext* userContext, RTCPointQueryFunction queryFunc, void** userPtrN)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcPointQuery16);
-
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene got not committed");
-    if (((size_t)valid) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)query) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "query not aligned to 16 bytes");   
-#endif
-    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(point_query.travs,cnt,cnt,cnt);
-
-    bool changed = false;
-    PointQuery16* query16 = (PointQuery16*)query;
-    PointQuery query1; 
-    for (size_t i=0; i<16; i++) {
-      if (!valid[i]) continue;
-      PointQuery query1; query16->get(i,query1);
-      changed |= pointQuery(scene, (RTCPointQuery*)&query1, userContext, queryFunc, userPtrN?userPtrN[i]:NULL);
-      query16->set(i,query1);
-    }
-    return changed;
-    RTC_CATCH_END2_FALSE(scene);
-  }
-
-  RTC_API void rtcIntersect1 (RTCScene hscene, RTCRayHit* rayhit, RTCIntersectArguments* args) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcIntersect1);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)rayhit) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
     STAT3(normal.travs,1,1,1);
-
-    RTCIntersectArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitIntersectArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-    
-    scene->intersectors.intersect(*rayhit,&context);
-#if defined(DEBUG)
-    ((RayHit*)rayhit)->verifyHit();
-#endif
-    RTC_CATCH_END2(scene);
+    IntersectContext context(scene,nullptr);
+    scene->intersect(ray,&context);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardIntersect1 (const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID)
-  {
-    rtcForwardIntersect1Ex(args, hscene, iray_, instID, 0);
-  }
-
-  RTC_API void rtcForwardIntersect1Ex(const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcIntersect1Ex (RTCScene hscene, const RTCIntersectContext* user_context, RTCRay& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect1Ex);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect1Ex);
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)iray_) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
-
-    Ray* iray = (Ray*) iray_;
-    RayHit* oray = (RayHit*)args->rayhit;
-    RTCRayQueryContext* user_context = args->context;
-    const Vec3ff ray_org_tnear = oray->org;
-    const Vec3ff ray_dir_time = oray->dir;
-    oray->org = iray->org;
-    oray->dir = iray->dir;
     STAT3(normal.travs,1,1,1);
-
-    RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
-    RayQueryContext context(scene,user_context,iargs);
-
-    instance_id_stack::push(user_context, instID, instPrimID);
-    scene->intersectors.intersect(*(RTCRayHit*)oray,&context);
-    instance_id_stack::pop(user_context);
-
-    oray->org = ray_org_tnear;
-    oray->dir = ray_dir_time;
-
-    RTC_CATCH_END2(scene);
+    IntersectContext context(scene,user_context);
+    scene->intersect(ray,&context);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcIntersect4 (const int* valid, RTCScene hscene, RTCRayHit4* rayhit, RTCIntersectArguments* args) 
+  RTCORE_API void rtcIntersect4 (const void* valid, RTCScene hscene, RTCRay4& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcIntersect4);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect4);
 
+#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)rayhit)   & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "rayhit not aligned to 16 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
+    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,cnt,cnt,cnt);
-
-    RTCIntersectArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitIntersectArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-
-    if (likely(scene->intersectors.intersector4))
-      scene->intersectors.intersect4(valid,*rayhit,&context);
-
-    else {
-      RayHit4* ray4 = (RayHit4*) rayhit;
-      for (size_t i=0; i<4; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray4->get(i,ray1);
-        scene->intersectors.intersect((RTCRayHit&)ray1,&context);
-        ray4->set(i,ray1);
-      }
-    }
-    
-    RTC_CATCH_END2(scene);
+    STAT3(normal.travs,1,cnt,4);
+    IntersectContext context(scene,nullptr);
+    scene->intersect4(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect4 not supported");  
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  template<int N> void copy(float* dst, float* src);
-
-  template<>
-  __forceinline void copy<4>(float* dst, float* src) {
-    vfloat4::storeu(&dst[0],vfloat4::loadu(&src[0]));
-  }
-
-  template<>
-  __forceinline void copy<8>(float* dst, float* src) {
-    vfloat4::storeu(&dst[0],vfloat4::loadu(&src[0]));
-    vfloat4::storeu(&dst[4],vfloat4::loadu(&src[4]));
-  }
-
-  template<>
-  __forceinline void copy<16>(float* dst, float* src) {
-    vfloat4::storeu(&dst[0],vfloat4::loadu(&src[0]));
-    vfloat4::storeu(&dst[4],vfloat4::loadu(&src[4]));
-    vfloat4::storeu(&dst[8],vfloat4::loadu(&src[8]));
-    vfloat4::storeu(&dst[12],vfloat4::loadu(&src[12]));
-  }
-
-  template<typename RTCRay, typename RTCRayHit, int N>
-  __forceinline void rtcForwardIntersectN(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcIntersect4Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay4& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTCRayHit* oray = (RTCRayHit*)args->rayhit;
-    RTCRayQueryContext* user_context = args->context;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect4Ex);
 
-    __aligned(16) float ray_org_x[N];
-    __aligned(16) float ray_org_y[N];
-    __aligned(16) float ray_org_z[N];
-    __aligned(16) float ray_dir_x[N];
-    __aligned(16) float ray_dir_y[N];
-    __aligned(16) float ray_dir_z[N];
-    
-    copy<N>(ray_org_x,oray->ray.org_x);
-    copy<N>(ray_org_y,oray->ray.org_y);
-    copy<N>(ray_org_z,oray->ray.org_z);
-    copy<N>(ray_dir_x,oray->ray.dir_x);
-    copy<N>(ray_dir_y,oray->ray.dir_y);
-    copy<N>(ray_dir_z,oray->ray.dir_z);
-    
-    copy<N>(oray->ray.org_x,iray->org_x);
-    copy<N>(oray->ray.org_y,iray->org_y);
-    copy<N>(oray->ray.org_z,iray->org_z);
-    copy<N>(oray->ray.dir_x,iray->dir_x);
-    copy<N>(oray->ray.dir_y,iray->dir_y);
-    copy<N>(oray->ray.dir_z,iray->dir_z);
-    
-    STAT(size_t cnt=0; for (size_t i=0; i<N; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,cnt,cnt,cnt);
-
-    RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
-    RayQueryContext context(scene,user_context,iargs);
-
-    instance_id_stack::push(user_context, instID, instPrimID);
-    scene->intersectors.intersect(valid,*oray,&context);
-    instance_id_stack::pop(user_context);
-
-    copy<N>(oray->ray.org_x,ray_org_x);
-    copy<N>(oray->ray.org_y,ray_org_y);
-    copy<N>(oray->ray.org_z,ray_org_z);
-    copy<N>(oray->ray.dir_x,ray_dir_x);
-    copy<N>(oray->ray.dir_y,ray_dir_y);
-    copy<N>(oray->ray.dir_z,ray_dir_z);
-  }
-
-  RTC_API void rtcForwardIntersect4(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardIntersect4);
-    return rtcForwardIntersect4Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardIntersect4Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID, unsigned int instPrimID)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect4);
-    rtcForwardIntersectN<RTCRay4,RTCRayHit4,4>(valid,args,hscene,iray,instID,instPrimID);
-    RTC_CATCH_END2(scene);
+#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
+    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(normal.travs,1,cnt,4);
+    IntersectContext context(scene,user_context);
+    scene->intersect4(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect4Ex not supported");  
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
   
-  RTC_API void rtcIntersect8 (const int* valid, RTCScene hscene, RTCRayHit8* rayhit, RTCIntersectArguments* args) 
+  RTCORE_API void rtcIntersect8 (const void* valid, RTCScene hscene, RTCRay8& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcIntersect8);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect8);
 
+#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x1F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)rayhit)   & 0x1F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "rayhit not aligned to 32 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
+    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,cnt,cnt,cnt);
-
-    RTCIntersectArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitIntersectArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-    
-    if (likely(scene->intersectors.intersector8)) 
-      scene->intersectors.intersect8(valid,*rayhit,&context);
-    
-    else
-    {
-      RayHit8* ray8 = (RayHit8*) rayhit;
-      for (size_t i=0; i<8; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray8->get(i,ray1);
-        scene->intersectors.intersect((RTCRayHit&)ray1,&context);
-        ray8->set(i,ray1);
-      }
-    }
-    
-    RTC_CATCH_END2(scene);
+    STAT3(normal.travs,1,cnt,8);
+    IntersectContext context(scene,nullptr);
+    scene->intersect8(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect8 not supported");      
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardIntersect8(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardIntersect8);
-    return rtcForwardIntersect8Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardIntersect8Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcIntersect8Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay8& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect8Ex);
-    rtcForwardIntersectN<RTCRay8,RTCRayHit8,8>(valid,args,hscene,iray,instID,instPrimID);
-    RTC_CATCH_END2(scene);
-  }
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect8Ex);
 
-  RTC_API void rtcIntersect16 (const int* valid, RTCScene hscene, RTCRayHit16* rayhit, RTCIntersectArguments* args) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcIntersect16);
-
+#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x3F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)rayhit)   & 0x3F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "rayhit not aligned to 64 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
+    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(normal.travs,1,cnt,8);
+    IntersectContext context(scene,user_context);
+    scene->intersect8(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect8Ex not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+  
+  RTCORE_API void rtcIntersect16 (const void* valid, RTCScene hscene, RTCRay16& ray) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect16);
+
+#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
+    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,cnt,cnt,cnt);
+    STAT3(normal.travs,1,cnt,16);
+    IntersectContext context(scene,nullptr);
+    scene->intersect16(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect16 not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
 
-    RTCIntersectArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitIntersectArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
+  RTCORE_API void rtcIntersect16Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay16& ray) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect16Ex);
 
-    if (likely(scene->intersectors.intersector16))
-      scene->intersectors.intersect16(valid,*rayhit,&context);
+#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
+    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(normal.travs,1,cnt,16);
+    IntersectContext context(scene,user_context);
+    scene->intersect16(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect16Ex not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
 
+  RTCORE_API void rtcIntersect1M (RTCScene hscene, const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect1M);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(normal.travs,M,M,M);
+    IntersectContext context(scene,user_context);
+
+    /* fast codepath for single rays */
+    if (likely(M == 1)) {
+      if (likely(rays->tnear <= rays->tfar)) 
+        scene->intersect(*rays,&context);
+    } 
+
+    /* codepath for streams */
     else {
-      RayHit16* ray16 = (RayHit16*) rayhit;
-      for (size_t i=0; i<16; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray16->get(i,ray1);
-        scene->intersectors.intersect((RTCRayHit&)ray1,&context);
-        ray16->set(i,ray1);
+      scene->device->rayStreamFilters.filterAOS(scene,rays,M,stride,&context,true);   
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect1M not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcIntersect1Mp (RTCScene hscene, const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersect1Mp);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(normal.travs,M,M,M);
+    IntersectContext context(scene,user_context);
+
+    /* fast codepath for single rays */
+    if (likely(M == 1)) {
+      if (likely(rays[0]->tnear <= rays[0]->tfar)) 
+        scene->intersect(*rays[0],&context);
+    } 
+
+    /* codepath for streams */
+    else {
+      scene->device->rayStreamFilters.filterAOP(scene,rays,M,&context,true);   
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersect1Mp not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcIntersectNM (RTCScene hscene, const RTCIntersectContext* user_context, struct RTCRayN* rays, const size_t N, const size_t M, const size_t stride) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersectNM);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(normal.travs,N*M,N*M,N*M);
+    IntersectContext context(scene,user_context);
+
+    /* code path for single ray streams */
+    if (likely(N == 1))
+    {
+      /* fast code path for streams of size 1 */
+      if (likely(M == 1)) {
+        if (likely(((RTCRay*)rays)->tnear <= ((RTCRay*)rays)->tfar))
+          scene->intersect(*(RTCRay*)rays,&context);
+      } 
+      /* normal codepath for single ray streams */
+      else {
+        scene->device->rayStreamFilters.filterAOS(scene,(RTCRay*)rays,M,stride,&context,true);
       }
     }
-
-    RTC_CATCH_END2(scene);
+    /* code path for ray packet streams */
+    else {
+      scene->device->rayStreamFilters.filterSOA(scene,(char*)rays,N,M,stride,&context,true);
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersectNM not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardIntersect16(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardIntersect16);
-    return rtcForwardIntersect16Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardIntersect16Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID, unsigned int instPrimID)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect16Ex);
-    rtcForwardIntersectN<RTCRay16,RTCRayHit16,16>(valid,args,hscene,iray,instID,instPrimID);
-    RTC_CATCH_END2(scene);
-  }
-
-  RTC_API void rtcOccluded1 (RTCScene hscene, RTCRay* ray, RTCOccludedArguments* args) 
+  RTCORE_API void rtcIntersectNp (RTCScene hscene, const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcOccluded1);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcIntersectNp);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays.orgx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgx not aligned to 4 bytes");   
+    if (((size_t)rays.orgy   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgy not aligned to 4 bytes");   
+    if (((size_t)rays.orgz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgz not aligned to 4 bytes");   
+    if (((size_t)rays.dirx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
+    if (((size_t)rays.diry   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.diry not aligned to 4 bytes");   
+    if (((size_t)rays.dirz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirz not aligned to 4 bytes");   
+    if (((size_t)rays.tnear  ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
+    if (((size_t)rays.tfar   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.tnear not aligned to 4 bytes");   
+    if (((size_t)rays.time   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.time not aligned to 4 bytes");   
+    if (((size_t)rays.mask   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.mask not aligned to 4 bytes");   
+    if (((size_t)rays.Ngx    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngx not aligned to 4 bytes");   
+    if (((size_t)rays.Ngy    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngy not aligned to 4 bytes");   
+    if (((size_t)rays.Ngz    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngz not aligned to 4 bytes");   
+    if (((size_t)rays.u      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.u not aligned to 4 bytes");   
+    if (((size_t)rays.v      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.v not aligned to 4 bytes");   
+    if (((size_t)rays.geomID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.geomID not aligned to 4 bytes");   
+    if (((size_t)rays.primID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.primID not aligned to 4 bytes");   
+    if (((size_t)rays.instID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.instID not aligned to 4 bytes");   
+#endif
+    STAT3(normal.travs,N,N,N);
+    IntersectContext context(scene,user_context);
+    scene->device->rayStreamFilters.filterSOP(scene,rays,N,&context,true);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcIntersectNp not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+  
+  RTCORE_API void rtcOccluded (RTCScene hscene, RTCRay& ray) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded);
     STAT3(shadow.travs,1,1,1);
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)ray) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
-
-    RTCOccludedArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitOccludedArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-    
-    scene->intersectors.occluded(*ray,&context);
-    RTC_CATCH_END2(scene);
+    IntersectContext context(scene,nullptr);
+    scene->occluded(ray,&context);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardOccluded1 (const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardOccluded1);
-    return rtcForwardOccluded1Ex(args, hscene, iray_, instID, 0);
-  }
-
-  RTC_API void rtcForwardOccluded1Ex(const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcOccluded1Ex (RTCScene hscene, const RTCIntersectContext* user_context, RTCRay& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded1Ex);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded1Ex);
     STAT3(shadow.travs,1,1,1);
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)iray_) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)&ray) & 0x0F        ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
-    
-    Ray* iray = (Ray*)iray_;
-    Ray* oray = (Ray*)args->ray;
-    RTCRayQueryContext* user_context = args->context;
-    const Vec3ff ray_org_tnear = oray->org;
-    const Vec3ff ray_dir_time = oray->dir;
-    oray->org = iray->org;
-    oray->dir = iray->dir;
-
-    RTCIntersectArguments* iargs = ((OccludedFunctionNArguments*) args)->args;
-    RayQueryContext context(scene,user_context,iargs);
-
-    instance_id_stack::push(user_context, instID, instPrimID);
-    scene->intersectors.occluded(*(RTCRay*)oray,&context);
-    instance_id_stack::pop(user_context);
-    
-    oray->org = ray_org_tnear;
-    oray->dir = ray_dir_time;
-
-    RTC_CATCH_END2(scene);
+    IntersectContext context(scene,user_context);
+    scene->occluded(ray,&context);
+    RTCORE_CATCH_END(scene->device);
   }
-
-  RTC_API void rtcOccluded4 (const int* valid, RTCScene hscene, RTCRay4* ray, RTCOccludedArguments* args) 
+  
+  RTCORE_API void rtcOccluded4 (const void* valid, RTCScene hscene, RTCRay4& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcOccluded4);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded4);
 
+#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
-    if (((size_t)ray)   & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
+    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,cnt,cnt,cnt);
-
-    RTCOccludedArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitOccludedArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-
-    if (likely(scene->intersectors.intersector4))
-       scene->intersectors.occluded4(valid,*ray,&context);
-
-    else {
-      RayHit4* ray4 = (RayHit4*) ray;
-      for (size_t i=0; i<4; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray4->get(i,ray1);
-        scene->intersectors.occluded((RTCRay&)ray1,&context);
-        ray4->geomID[i] = ray1.geomID; 
-      }
-    }
-    
-    RTC_CATCH_END2(scene);
+    STAT3(shadow.travs,1,cnt,4);
+    IntersectContext context(scene,nullptr);
+    scene->occluded4(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded4 not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  template<typename RTCRay, int N>
-  __forceinline void rtcForwardOccludedN (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcOccluded4Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay4& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTCRay* oray = (RTCRay*)args->ray;
-    RTCRayQueryContext* user_context = args->context;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded4Ex);
 
-    __aligned(16) float ray_org_x[N];
-    __aligned(16) float ray_org_y[N];
-    __aligned(16) float ray_org_z[N];
-    __aligned(16) float ray_dir_x[N];
-    __aligned(16) float ray_dir_y[N];
-    __aligned(16) float ray_dir_z[N];
-    
-    copy<N>(ray_org_x,oray->org_x);
-    copy<N>(ray_org_y,oray->org_y);
-    copy<N>(ray_org_z,oray->org_z);
-    copy<N>(ray_dir_x,oray->dir_x);
-    copy<N>(ray_dir_y,oray->dir_y);
-    copy<N>(ray_dir_z,oray->dir_z);
-    
-    copy<N>(oray->org_x,iray->org_x);
-    copy<N>(oray->org_y,iray->org_y);
-    copy<N>(oray->org_z,iray->org_z);
-    copy<N>(oray->dir_x,iray->dir_x);
-    copy<N>(oray->dir_y,iray->dir_y);
-    copy<N>(oray->dir_z,iray->dir_z);
-    
-    STAT(size_t cnt=0; for (size_t i=0; i<N; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(normal.travs,cnt,cnt,cnt);
-
-    RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
-    RayQueryContext context(scene,user_context,iargs);
-
-    instance_id_stack::push(user_context, instID, instPrimID);
-    scene->intersectors.occluded(valid,*oray,&context);
-    instance_id_stack::pop(user_context);
-
-    copy<N>(oray->org_x,ray_org_x);
-    copy<N>(oray->org_y,ray_org_y);
-    copy<N>(oray->org_z,ray_org_z);
-    copy<N>(oray->dir_x,ray_dir_x);
-    copy<N>(oray->dir_y,ray_dir_y);
-    copy<N>(oray->dir_z,ray_dir_z);
-  }
-
-  RTC_API void rtcForwardOccluded4(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardOccluded4);
-    return rtcForwardOccluded4Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardOccluded4Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID, unsigned int instPrimID)
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded4);
-    rtcForwardOccludedN<RTCRay4,4>(valid,args,hscene,iray,instID,instPrimID);
-    RTC_CATCH_END2(scene);
+#if defined(__TARGET_SIMD4__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 16 bytes");   
+    if (((size_t)&ray ) & 0x0F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<4; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(shadow.travs,1,cnt,4);
+    IntersectContext context(scene,user_context);
+    scene->occluded4(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded4Ex not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
  
-  RTC_API void rtcOccluded8 (const int* valid, RTCScene hscene, RTCRay8* ray, RTCOccludedArguments* args) 
+  RTCORE_API void rtcOccluded8 (const void* valid, RTCScene hscene, RTCRay8& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcOccluded8);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded8);
 
+#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x1F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
-    if (((size_t)ray)   & 0x1F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
+    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,cnt,cnt,cnt);
-
-    RTCOccludedArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitOccludedArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
-
-    if (likely(scene->intersectors.intersector8))
-      scene->intersectors.occluded8(valid,*ray,&context);
-
-    else {
-      RayHit8* ray8 = (RayHit8*) ray;
-      for (size_t i=0; i<8; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray8->get(i,ray1);
-        scene->intersectors.occluded((RTCRay&)ray1,&context);
-        ray8->set(i,ray1);
-      }
-    }
-
-    RTC_CATCH_END2(scene);
+    STAT3(shadow.travs,1,cnt,8);
+    IntersectContext context(scene,nullptr);
+    scene->occluded8(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded8 not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardOccluded8(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardOccluded8);
-    return rtcForwardOccluded8Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardOccluded8Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcOccluded8Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay8& ray) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded8Ex);
-    rtcForwardOccludedN<RTCRay8,8>(valid, args, hscene, iray, instID, instPrimID);
-    RTC_CATCH_END2(scene);
-  }
-   
-  RTC_API void rtcOccluded16 (const int* valid, RTCScene hscene, RTCRay16* ray, RTCOccludedArguments* args) 
-  {
-    Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcOccluded16);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded8Ex);
 
+#if defined(__TARGET_SIMD8__) && defined (EMBREE_RAY_PACKETS)
 #if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)valid) & 0x3F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
-    if (((size_t)ray)   & 0x3F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 32 bytes");   
+    if (((size_t)&ray ) & 0x1F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 32 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<8; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(shadow.travs,1,cnt,8);
+    IntersectContext context(scene,user_context);
+    scene->occluded8(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded8Ex not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+  
+  RTCORE_API void rtcOccluded16 (const void* valid, RTCScene hscene, RTCRay16& ray) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded16);
+
+#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
+    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
 #endif
     STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
-    STAT3(shadow.travs,cnt,cnt,cnt);
+    STAT3(shadow.travs,1,cnt,16);
+    IntersectContext context(scene,nullptr);
+    scene->occluded16(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded16 not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
 
-    RTCOccludedArguments defaultArgs;
-    if (unlikely(args == nullptr)) {
-      rtcInitOccludedArguments(&defaultArgs);
-      args = &defaultArgs;
-    }
-    RTCRayQueryContext* user_context = args->context;
-    
-    RTCRayQueryContext defaultContext;
-    if (unlikely(user_context == nullptr)) {
-      rtcInitRayQueryContext(&defaultContext);
-      user_context = &defaultContext;
-    }
-    RayQueryContext context(scene,user_context,args);
+  RTCORE_API void rtcOccluded16Ex (const void* valid, RTCScene hscene, const RTCIntersectContext* user_context, RTCRay16& ray) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded16Ex);
 
-    if (likely(scene->intersectors.intersector16))
-      scene->intersectors.occluded16(valid,*ray,&context);
+#if defined(__TARGET_SIMD16__) && defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)valid) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "mask not aligned to 64 bytes");   
+    if (((size_t)&ray ) & 0x3F       ) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 64 bytes");   
+#endif
+    STAT(size_t cnt=0; for (size_t i=0; i<16; i++) cnt += ((int*)valid)[i] == -1;);
+    STAT3(shadow.travs,1,cnt,16);
+    IntersectContext context(scene,user_context);
+    scene->occluded16(valid,ray,&context);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded16Ex not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+  
+  RTCORE_API void rtcOccluded1M(RTCScene hscene, const RTCIntersectContext* user_context, RTCRay* rays, const size_t M, const size_t stride) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded1M);
 
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(shadow.travs,M,M,M);
+    IntersectContext context(scene,user_context);
+
+    /* fast codepath for streams of size 1 */
+    if (likely(M == 1)) {
+      if (likely(rays->tnear <= rays->tfar)) 
+        scene->occluded (*rays,&context);
+    } 
+    /* codepath for normal streams */
     else {
-      RayHit16* ray16 = (RayHit16*) ray;
-      for (size_t i=0; i<16; i++) {
-        if (!valid[i]) continue;
-        RayHit ray1; ray16->get(i,ray1);
-        scene->intersectors.occluded((RTCRay&)ray1,&context);
-        ray16->set(i,ray1);
+      scene->device->rayStreamFilters.filterAOS(scene,rays,M,stride,&context,false);
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded1M not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcOccluded1Mp(RTCScene hscene, const RTCIntersectContext* user_context, RTCRay** rays, const size_t M) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccluded1Mp);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(shadow.travs,M,M,M);
+    IntersectContext context(scene,user_context);
+
+    /* fast codepath for streams of size 1 */
+    if (likely(M == 1)) {
+      if (likely(rays[0]->tnear <= rays[0]->tfar)) 
+        scene->occluded (*rays[0],&context);
+    } 
+    /* codepath for normal streams */
+    else {
+      scene->device->rayStreamFilters.filterAOP(scene,rays,M,&context,false);
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccluded1Mp not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcOccludedNM(RTCScene hscene, const RTCIntersectContext* user_context, RTCRayN* rays, const size_t N, const size_t M, const size_t stride) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccludedNM);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (stride < sizeof(RTCRay)) throw_RTCError(RTC_INVALID_OPERATION,"stride too small");
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays ) & 0x03) throw_RTCError(RTC_INVALID_ARGUMENT, "ray not aligned to 4 bytes");   
+#endif
+    STAT3(shadow.travs,N*M,N*N,N*N);
+    IntersectContext context(scene,user_context);
+
+    /* codepath for single rays */
+    if (likely(N == 1))
+    {
+      /* fast path for streams of size 1 */
+      if (likely(M == 1)) {
+        if (likely(((RTCRay*)rays)->tnear <= ((RTCRay*)rays)->tfar))
+          scene->occluded (*(RTCRay*)rays,&context);
+      } 
+      /* codepath for normal ray streams */
+      else {
+        scene->device->rayStreamFilters.filterAOS(scene,(RTCRay*)rays,M,stride,&context,false);
       }
     }
-
-    RTC_CATCH_END2(scene);
+    /* code path for ray packet streams */
+    else {
+      scene->device->rayStreamFilters.filterSOA(scene,(char*)rays,N,M,stride,&context,false);
+    }
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccludedNM not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcForwardOccluded16(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
-  {
-    RTC_TRACE(rtcForwardOccluded16);
-    return rtcForwardOccluded16Ex(valid, args, hscene, iray, instID, 0);
-  }
-
-  RTC_API void rtcForwardOccluded16Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID, unsigned int instPrimID)
+  RTCORE_API void rtcOccludedNp(RTCScene hscene, const RTCIntersectContext* user_context, const RTCRayNp& rays, const size_t N) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded16Ex);
-    rtcForwardOccludedN<RTCRay16,16>(valid, args, hscene, iray, instID, instPrimID);
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcOccludedNp);
+
+#if defined (EMBREE_RAY_PACKETS)
+#if defined(DEBUG)
+    RTCORE_VERIFY_HANDLE(hscene);
+    if (scene->isModified()) throw_RTCError(RTC_INVALID_OPERATION,"scene got not committed");
+    if (((size_t)rays.orgx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgx not aligned to 4 bytes");   
+    if (((size_t)rays.orgy   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgy not aligned to 4 bytes");   
+    if (((size_t)rays.orgz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.orgz not aligned to 4 bytes");   
+    if (((size_t)rays.dirx   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
+    if (((size_t)rays.diry   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.diry not aligned to 4 bytes");   
+    if (((size_t)rays.dirz   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirz not aligned to 4 bytes");   
+    if (((size_t)rays.tnear  ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.dirx not aligned to 4 bytes");   
+    if (((size_t)rays.tfar   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.tnear not aligned to 4 bytes");   
+    if (((size_t)rays.time   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.time not aligned to 4 bytes");   
+    if (((size_t)rays.mask   ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.mask not aligned to 4 bytes");   
+    if (((size_t)rays.Ngx    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngx not aligned to 4 bytes");   
+    if (((size_t)rays.Ngy    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngy not aligned to 4 bytes");   
+    if (((size_t)rays.Ngz    ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.Ngz not aligned to 4 bytes");   
+    if (((size_t)rays.u      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.u not aligned to 4 bytes");   
+    if (((size_t)rays.v      ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.v not aligned to 4 bytes");   
+    if (((size_t)rays.geomID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.geomID not aligned to 4 bytes");   
+    if (((size_t)rays.primID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.primID not aligned to 4 bytes");   
+    if (((size_t)rays.instID ) & 0x03 ) throw_RTCError(RTC_INVALID_ARGUMENT, "rays.instID not aligned to 4 bytes");   
+#endif
+    STAT3(shadow.travs,N,N,N);
+    IntersectContext context(scene,user_context);
+    scene->device->rayStreamFilters.filterSOP(scene,rays,N,&context,false);
+#else
+    throw_RTCError(RTC_INVALID_OPERATION,"rtcOccludedNp not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
   }
   
-  RTC_API void rtcRetainScene (RTCScene hscene) 
+  RTCORE_API void rtcDeleteScene (RTCScene hscene) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcRetainScene);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    scene->refInc();
-    RTC_CATCH_END2(scene);
+    Device* device = scene ? scene->device : nullptr;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeleteScene);
+    RTCORE_VERIFY_HANDLE(hscene);
+    delete scene;
+    RTCORE_CATCH_END(device);
   }
-  
-  RTC_API void rtcReleaseScene (RTCScene hscene) 
+
+  RTCORE_API unsigned rtcNewInstance (RTCScene htarget, RTCScene hsource) 
+  {
+    Scene* target = (Scene*) htarget;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewInstance);
+    RTCORE_VERIFY_HANDLE(htarget);
+    RTCORE_VERIFY_HANDLE(hsource);
+#if defined(EMBREE_GEOMETRY_USER)
+    Scene* source = (Scene*) hsource;
+    if (target->device != source->device) throw_RTCError(RTC_INVALID_OPERATION,"scenes do not belong to the same device");
+    return target->newInstance(source,1);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewInstance is not supported");
+#endif
+    RTCORE_CATCH_END(target->device);
+    return -1;
+  }
+
+  RTCORE_API unsigned rtcNewInstance2 (RTCScene htarget, RTCScene hsource, size_t numTimeSteps) 
+  {
+    Scene* target = (Scene*) htarget;
+    Scene* source = (Scene*) hsource;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewInstance2);
+    RTCORE_VERIFY_HANDLE(htarget);
+    RTCORE_VERIFY_HANDLE(hsource);
+#if defined(EMBREE_GEOMETRY_USER)
+    if (target->device != source->device) throw_RTCError(RTC_INVALID_OPERATION,"scenes do not belong to the same device");
+    return target->newInstance(source,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewInstance2 is not supported");
+#endif
+    RTCORE_CATCH_END(target->device);
+    return -1;
+  }
+
+  RTCORE_API unsigned rtcNewGeometryInstance (RTCScene hscene, unsigned geomID) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcReleaseScene);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
-    scene->refDec();
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewGeometryInstance);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    return scene->newGeometryInstance(scene->get_locked(geomID));
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometryInstancedScene(RTCGeometry hgeometry, RTCScene hscene)
+  RTCORE_API unsigned rtcNewGeometryGroup (RTCScene hscene, RTCGeometryFlags flags, unsigned* geomIDs, size_t N) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    Ref<Scene> scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryInstancedScene);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setInstancedScene(scene);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewGeometryGroup);
+    RTCORE_VERIFY_HANDLE(hscene);
+    std::vector<Geometry*> geometries(N);
+    for (size_t i=0; i<N; i++) {
+      RTCORE_VERIFY_GEOMID(geomIDs[i]);
+      geometries[i] = scene->get_locked(geomIDs[i]);
+      if (geometries[i]->getType() == Geometry::GROUP)
+        throw_RTCError(RTC_INVALID_ARGUMENT,"geometry groups cannot contain other geometry groups");
+      if (geometries[i]->getType() != geometries[0]->getType())
+        throw_RTCError(RTC_INVALID_ARGUMENT,"geometries inside group have to be of same type");
+    }
+    return scene->newGeometryGroup(flags,geometries);
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometryInstancedScenes(RTCGeometry hgeometry, RTCScene* scenes, size_t numScenes)
+  AffineSpace3fa convertTransform(RTCMatrixType layout, const float* xfm)
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryInstancedScene);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_HANDLE(scenes);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setInstancedScenes(scenes, numScenes);
-    RTC_CATCH_END2(geometry);
-  }
-
-  AffineSpace3fa loadTransform(RTCFormat format, const float* xfm)
-  {
-    AffineSpace3fa space = one;
-    switch (format)
+    AffineSpace3fa transform = one;
+    switch (layout) 
     {
-    case RTC_FORMAT_FLOAT3X4_ROW_MAJOR:
-      space = AffineSpace3fa(Vec3fa(xfm[ 0], xfm[ 4], xfm[ 8]),
-                             Vec3fa(xfm[ 1], xfm[ 5], xfm[ 9]),
-                             Vec3fa(xfm[ 2], xfm[ 6], xfm[10]),
-                             Vec3fa(xfm[ 3], xfm[ 7], xfm[11]));
+    case RTC_MATRIX_ROW_MAJOR:
+      transform = AffineSpace3fa(Vec3fa(xfm[ 0],xfm[ 4],xfm[ 8]),
+                                 Vec3fa(xfm[ 1],xfm[ 5],xfm[ 9]),
+                                 Vec3fa(xfm[ 2],xfm[ 6],xfm[10]),
+                                 Vec3fa(xfm[ 3],xfm[ 7],xfm[11]));
       break;
 
-    case RTC_FORMAT_FLOAT3X4_COLUMN_MAJOR:
-      space = AffineSpace3fa(Vec3fa(xfm[ 0], xfm[ 1], xfm[ 2]),
-                             Vec3fa(xfm[ 3], xfm[ 4], xfm[ 5]),
-                             Vec3fa(xfm[ 6], xfm[ 7], xfm[ 8]),
-                             Vec3fa(xfm[ 9], xfm[10], xfm[11]));
+    case RTC_MATRIX_COLUMN_MAJOR:
+      transform = AffineSpace3fa(Vec3fa(xfm[ 0],xfm[ 1],xfm[ 2]),
+                                 Vec3fa(xfm[ 3],xfm[ 4],xfm[ 5]),
+                                 Vec3fa(xfm[ 6],xfm[ 7],xfm[ 8]),
+                                 Vec3fa(xfm[ 9],xfm[10],xfm[11]));
       break;
 
-    case RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR:
-      space = AffineSpace3fa(Vec3fa(xfm[ 0], xfm[ 1], xfm[ 2]),
-                             Vec3fa(xfm[ 4], xfm[ 5], xfm[ 6]),
-                             Vec3fa(xfm[ 8], xfm[ 9], xfm[10]),
-                             Vec3fa(xfm[12], xfm[13], xfm[14]));
+    case RTC_MATRIX_COLUMN_MAJOR_ALIGNED16:
+      transform = AffineSpace3fa(Vec3fa(xfm[ 0],xfm[ 1],xfm[ 2]),
+                                 Vec3fa(xfm[ 4],xfm[ 5],xfm[ 6]),
+                                 Vec3fa(xfm[ 8],xfm[ 9],xfm[10]),
+                                 Vec3fa(xfm[12],xfm[13],xfm[14]));
       break;
 
     default: 
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid matrix format");
+      throw_RTCError(RTC_INVALID_OPERATION,"Unknown matrix type");
       break;
     }
-    return space;
+    return transform;
   }
 
-RTC_API void rtcSetGeometryTransform(RTCGeometry hgeometry, unsigned int timeStep, RTCFormat format, const void* xfm)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTransform);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_HANDLE(xfm);
-    RTC_ENTER_DEVICE(hgeometry);
-    const AffineSpace3fa transform = loadTransform(format, (const float*)xfm);
-    geometry->setTransform(transform, timeStep);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryTransformQuaternion(RTCGeometry hgeometry, unsigned int timeStep, const RTCQuaternionDecomposition* qd)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTransformQuaternion);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_HANDLE(qd);
-    RTC_ENTER_DEVICE(hgeometry);
-    
-    AffineSpace3fx transform;
-    transform.l.vx.x = qd->scale_x;
-    transform.l.vy.y = qd->scale_y;
-    transform.l.vz.z = qd->scale_z;
-    transform.l.vy.x = qd->skew_xy;
-    transform.l.vz.x = qd->skew_xz;
-    transform.l.vz.y = qd->skew_yz;
-    transform.l.vx.y = qd->translation_x;
-    transform.l.vx.z = qd->translation_y;
-    transform.l.vy.z = qd->translation_z;
-    transform.p.x    = qd->shift_x;
-    transform.p.y    = qd->shift_y;
-    transform.p.z    = qd->shift_z;
-
-    // normalize quaternion
-    Quaternion3f q(qd->quaternion_r, qd->quaternion_i, qd->quaternion_j, qd->quaternion_k);
-    q = normalize(q);
-    transform.l.vx.w = q.i;
-    transform.l.vy.w = q.j;
-    transform.l.vz.w = q.k;
-    transform.p.w    = q.r;
-
-    geometry->setQuaternionDecomposition(transform, timeStep);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcGetGeometryTransform(RTCGeometry hgeometry, float time, RTCFormat format, void* xfm)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryTransform);
-    //RTC_ENTER_DEVICE(hgeometry); // no allocation required
-    const AffineSpace3fa transform = geometry->getTransform(time);
-    storeTransform(transform, format, (float*)xfm);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcGetGeometryTransformEx(RTCGeometry hgeometry, unsigned int instPrimID, float time, RTCFormat format, void* xfm)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryTransformEx);
-    //RTC_ENTER_DEVICE(hgeometry); // no allocation required
-    const AffineSpace3fa transform = geometry->getTransform(instPrimID, time);
-    storeTransform(transform, format, (float*)xfm);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcGetGeometryTransformFromScene(RTCScene hscene, unsigned int geomID, float time, RTCFormat format, void* xfm)
+  RTCORE_API void rtcSetTransform (RTCScene hscene, unsigned geomID, RTCMatrixType layout, const float* xfm) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryTransformFromScene);
-    //RTC_ENTER_DEVICE(hscene); // no allocation required
-    const AffineSpace3fa transform = scene->get(geomID)->getTransform(time);
-    storeTransform(transform, format, (float*)xfm);
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetTransform);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    RTCORE_VERIFY_HANDLE(xfm);
+    const AffineSpace3fa transform = convertTransform(layout,xfm);
+    ((Scene*) scene)->get_locked(geomID)->setTransform(transform,0);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcInvokeIntersectFilterFromGeometry(const struct RTCIntersectFunctionNArguments* const args_i, const struct RTCFilterFunctionNArguments* filter_args)
+  RTCORE_API void rtcSetTransform2 (RTCScene hscene, unsigned geomID, RTCMatrixType layout, const float* xfm, size_t timeStep) 
   {
-    IntersectFunctionNArguments* args = (IntersectFunctionNArguments*) args_i;
-    if (args->geometry->intersectionFilterN)
-        args->geometry->intersectionFilterN(filter_args);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetTransform);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    RTCORE_VERIFY_HANDLE(xfm);
+    const AffineSpace3fa transform = convertTransform(layout,xfm);
+    ((Scene*) scene)->get_locked(geomID)->setTransform(transform,timeStep);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcInvokeOccludedFilterFromGeometry(const struct RTCOccludedFunctionNArguments* const args_i, const struct RTCFilterFunctionNArguments* filter_args)
+  RTCORE_API unsigned rtcNewUserGeometry (RTCScene hscene, size_t numItems) 
   {
-    OccludedFunctionNArguments* args = (OccludedFunctionNArguments*) args_i;
-    if (args->geometry->occlusionFilterN)
-      args->geometry->occlusionFilterN(filter_args);
-  }
-  
-  RTC_API RTCGeometry rtcNewGeometry (RTCDevice hdevice, RTCGeometryType type)
-  {
-    Device* device = (Device*) hdevice;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcNewGeometry);
-    RTC_ENTER_DEVICE(hdevice);
-    RTC_VERIFY_HANDLE(hdevice);
-
-    switch (type)
-    {
-    case RTC_GEOMETRY_TYPE_TRIANGLE:
-    {
-#if defined(EMBREE_GEOMETRY_TRIANGLE)
-      createTriangleMeshTy createTriangleMesh = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createTriangleMesh);
-      Geometry* geom = createTriangleMesh(device);
-      return (RTCGeometry) geom->refInc();
-#else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_TRIANGLE is not supported");
-#endif
-    }
-    
-    case RTC_GEOMETRY_TYPE_QUAD:
-    {
-#if defined(EMBREE_GEOMETRY_QUAD)
-      createQuadMeshTy createQuadMesh = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createQuadMesh);
-      Geometry* geom = createQuadMesh(device);
-      return (RTCGeometry) geom->refInc();
-#else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_QUAD is not supported");
-#endif
-    }
-    
-    case RTC_GEOMETRY_TYPE_SPHERE_POINT:
-    case RTC_GEOMETRY_TYPE_DISC_POINT:
-    case RTC_GEOMETRY_TYPE_ORIENTED_DISC_POINT:
-    {
-#if defined(EMBREE_GEOMETRY_POINT)
-      createPointsTy createPoints = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_builder_cpu_features, createPoints);
-
-      Geometry *geom;
-      switch(type) {
-        case RTC_GEOMETRY_TYPE_SPHERE_POINT:
-          geom = createPoints(device, Geometry::GTY_SPHERE_POINT);
-          break;
-        case RTC_GEOMETRY_TYPE_DISC_POINT:
-          geom = createPoints(device, Geometry::GTY_DISC_POINT);
-          break;
-        case RTC_GEOMETRY_TYPE_ORIENTED_DISC_POINT:
-          geom = createPoints(device, Geometry::GTY_ORIENTED_DISC_POINT);
-          break;
-        default:
-          geom = nullptr;
-          break;
-      }
-      return (RTCGeometry) geom->refInc();
-#else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_POINT is not supported");
-#endif
-    }
-
-    case RTC_GEOMETRY_TYPE_CONE_LINEAR_CURVE:
-    case RTC_GEOMETRY_TYPE_ROUND_LINEAR_CURVE:
-    case RTC_GEOMETRY_TYPE_FLAT_LINEAR_CURVE:
-      
-    case RTC_GEOMETRY_TYPE_ROUND_BEZIER_CURVE:
-    case RTC_GEOMETRY_TYPE_FLAT_BEZIER_CURVE:
-    case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_BEZIER_CURVE:
-      
-    case RTC_GEOMETRY_TYPE_ROUND_BSPLINE_CURVE:
-    case RTC_GEOMETRY_TYPE_FLAT_BSPLINE_CURVE:
-    case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_BSPLINE_CURVE:
-
-    case RTC_GEOMETRY_TYPE_ROUND_HERMITE_CURVE:
-    case RTC_GEOMETRY_TYPE_FLAT_HERMITE_CURVE:
-    case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_HERMITE_CURVE:
-
-    case RTC_GEOMETRY_TYPE_ROUND_CATMULL_ROM_CURVE:
-    case RTC_GEOMETRY_TYPE_FLAT_CATMULL_ROM_CURVE:
-    case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_CATMULL_ROM_CURVE:
-    {
-#if defined(EMBREE_GEOMETRY_CURVE)
-      createLineSegmentsTy createLineSegments = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createLineSegments);
-      createCurvesTy createCurves = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createCurves);
-      
-      Geometry* geom;
-      switch (type) {
-      case RTC_GEOMETRY_TYPE_CONE_LINEAR_CURVE             : geom = createLineSegments (device,Geometry::GTY_CONE_LINEAR_CURVE); break;
-      case RTC_GEOMETRY_TYPE_ROUND_LINEAR_CURVE            : geom = createLineSegments (device,Geometry::GTY_ROUND_LINEAR_CURVE); break;
-      case RTC_GEOMETRY_TYPE_FLAT_LINEAR_CURVE             : geom = createLineSegments (device,Geometry::GTY_FLAT_LINEAR_CURVE); break;
-      //case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_LINEAR_CURVE  : geom = createLineSegments (device,Geometry::GTY_ORIENTED_LINEAR_CURVE); break;
-        
-      case RTC_GEOMETRY_TYPE_ROUND_BEZIER_CURVE            : geom = createCurves(device,Geometry::GTY_ROUND_BEZIER_CURVE); break;
-      case RTC_GEOMETRY_TYPE_FLAT_BEZIER_CURVE             : geom = createCurves(device,Geometry::GTY_FLAT_BEZIER_CURVE); break;
-      case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_BEZIER_CURVE  : geom = createCurves(device,Geometry::GTY_ORIENTED_BEZIER_CURVE); break;
-        
-      case RTC_GEOMETRY_TYPE_ROUND_BSPLINE_CURVE           : geom = createCurves(device,Geometry::GTY_ROUND_BSPLINE_CURVE); break;
-      case RTC_GEOMETRY_TYPE_FLAT_BSPLINE_CURVE            : geom = createCurves(device,Geometry::GTY_FLAT_BSPLINE_CURVE); break;
-      case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_BSPLINE_CURVE : geom = createCurves(device,Geometry::GTY_ORIENTED_BSPLINE_CURVE); break;
-        
-      case RTC_GEOMETRY_TYPE_ROUND_HERMITE_CURVE           : geom = createCurves(device,Geometry::GTY_ROUND_HERMITE_CURVE); break;
-      case RTC_GEOMETRY_TYPE_FLAT_HERMITE_CURVE            : geom = createCurves(device,Geometry::GTY_FLAT_HERMITE_CURVE); break;
-      case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_HERMITE_CURVE : geom = createCurves(device,Geometry::GTY_ORIENTED_HERMITE_CURVE); break;
-
-      case RTC_GEOMETRY_TYPE_ROUND_CATMULL_ROM_CURVE           : geom = createCurves(device,Geometry::GTY_ROUND_CATMULL_ROM_CURVE); break;
-      case RTC_GEOMETRY_TYPE_FLAT_CATMULL_ROM_CURVE            : geom = createCurves(device,Geometry::GTY_FLAT_CATMULL_ROM_CURVE); break;
-      case RTC_GEOMETRY_TYPE_NORMAL_ORIENTED_CATMULL_ROM_CURVE : geom = createCurves(device,Geometry::GTY_ORIENTED_CATMULL_ROM_CURVE); break;
-      default:                                    geom = nullptr; break;
-      }
-      return (RTCGeometry) geom->refInc();
-#else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_CURVE is not supported");
-#endif
-    }
-    
-    case RTC_GEOMETRY_TYPE_SUBDIVISION:
-    {
-#if defined(EMBREE_GEOMETRY_SUBDIVISION)
-      createSubdivMeshTy createSubdivMesh = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX(device->enabled_cpu_features,createSubdivMesh);
-      //SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createSubdivMesh); // FIXME: this does not work for some reason?
-      Geometry* geom = createSubdivMesh(device);
-      return (RTCGeometry) geom->refInc();
-#else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_SUBDIVISION is not supported");
-#endif
-    }
-    
-    case RTC_GEOMETRY_TYPE_USER:
-    {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewUserGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
 #if defined(EMBREE_GEOMETRY_USER)
-      createUserGeometryTy createUserGeometry = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createUserGeometry);
-      Geometry* geom = createUserGeometry(device);
-      return (RTCGeometry) geom->refInc();
+    return scene->newUserGeometry(RTC_GEOMETRY_STATIC,numItems,1);
 #else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_USER is not supported");
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewUserGeometry is not supported");
 #endif
-    }
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
 
-    case RTC_GEOMETRY_TYPE_INSTANCE:
-    {
-#if defined(EMBREE_GEOMETRY_INSTANCE)
-      createInstanceTy createInstance = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createInstance);
-      Geometry* geom = createInstance(device);
-      return (RTCGeometry) geom->refInc();
+  RTCORE_API unsigned rtcNewUserGeometry2 (RTCScene hscene, size_t numItems, size_t numTimeSteps) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewUserGeometry2);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_USER)
+    return scene->newUserGeometry(RTC_GEOMETRY_STATIC,numItems,numTimeSteps);
 #else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_INSTANCE is not supported");
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewUserGeometry2 is not supported");
 #endif
-    }
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
 
-    case RTC_GEOMETRY_TYPE_INSTANCE_ARRAY:
-    {
-#if defined(EMBREE_GEOMETRY_INSTANCE_ARRAY)
-      createInstanceArrayTy createInstanceArray = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createInstanceArray);
-      Geometry* geom = createInstanceArray(device);
-      return (RTCGeometry) geom->refInc();
+  RTCORE_API unsigned rtcNewUserGeometry3 (RTCScene hscene, RTCGeometryFlags gflags, size_t numItems, size_t numTimeSteps) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewUserGeometry2);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_USER)
+    return scene->newUserGeometry(gflags,numItems,numTimeSteps);
 #else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_INSTANCE_ARRAY is not supported");
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewUserGeometry3 is not supported");
 #endif
-    }
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
 
-    case RTC_GEOMETRY_TYPE_GRID:
-    {
-#if defined(EMBREE_GEOMETRY_GRID)
-      createGridMeshTy createGridMesh = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createGridMesh);
-      Geometry* geom = createGridMesh(device);
-      return (RTCGeometry) geom->refInc();
+  RTCORE_API unsigned rtcNewTriangleMesh (RTCScene hscene, RTCGeometryFlags flags, size_t numTriangles, size_t numVertices, size_t numTimeSteps) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewTriangleMesh);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_TRIANGLES)
+    return scene->newTriangleMesh(flags,numTriangles,numVertices,numTimeSteps);
 #else
-      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_GRID is not supported");
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewTriangleMesh is not supported");
 #endif
-    }
-    
-    default:
-      throw_RTCError(RTC_ERROR_UNKNOWN,"invalid geometry type");
-    }
-    
-    RTC_CATCH_END(device);
-    return nullptr;
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometryUserPrimitiveCount(RTCGeometry hgeometry, unsigned int userPrimitiveCount)
+  RTCORE_API unsigned rtcNewQuadMesh (RTCScene hscene, RTCGeometryFlags flags, size_t numQuads, size_t numVertices, size_t numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryUserPrimitiveCount);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    
-    if (unlikely(geometry->getType() != Geometry::GTY_USER_GEOMETRY))
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION,"operation only allowed for user geometries"); 
-
-    geometry->setNumPrimitives(userPrimitiveCount);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryTimeStepCount(RTCGeometry hgeometry, unsigned int timeStepCount)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTimeStepCount);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-
-    if (timeStepCount > RTC_MAX_TIME_STEP_COUNT)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"number of time steps is out of range");
-    
-    geometry->setNumTimeSteps(timeStepCount);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryTimeRange(RTCGeometry hgeometry, float startTime, float endTime)
-  {
-    Ref<Geometry> geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTimeRange);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-
-    if (startTime > endTime)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"startTime has to be smaller or equal to the endTime");
-        
-    geometry->setTimeRange(BBox1f(startTime,endTime));
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryVertexAttributeCount(RTCGeometry hgeometry, unsigned int N)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryVertexAttributeCount);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setVertexAttributeCount(N);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryTopologyCount(RTCGeometry hgeometry, unsigned int N)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTopologyCount);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setTopologyCount(N);
-    RTC_CATCH_END2(geometry);
-  }
- 
-  RTC_API void rtcSetGeometryBuildQuality (RTCGeometry hgeometry, RTCBuildQuality quality) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryBuildQuality);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    if (quality != RTC_BUILD_QUALITY_LOW &&
-        quality != RTC_BUILD_QUALITY_MEDIUM &&
-        quality != RTC_BUILD_QUALITY_HIGH &&
-        quality != RTC_BUILD_QUALITY_REFIT)
-      throw std::runtime_error("invalid build quality");
-    geometry->setBuildQuality(quality);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryMaxRadiusScale(RTCGeometry hgeometry, float maxRadiusScale)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryMaxRadiusScale);
-    RTC_VERIFY_HANDLE(hgeometry);
-#if RTC_MIN_WIDTH
-    if (maxRadiusScale < 1.0f) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"maximal radius scale has to be larger or equal to 1");
-    geometry->setMaxRadiusScale(maxRadiusScale);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewQuadMesh);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_QUADS)
+    return scene->newQuadMesh(flags,numQuads,numVertices,numTimeSteps);
 #else
-    throw_RTCError(RTC_ERROR_INVALID_OPERATION,"min-width feature is not enabled");
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewQuadMesh is not supported");
 #endif
-    RTC_CATCH_END2(geometry);
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
+
+  RTCORE_API unsigned rtcNewHairGeometry (RTCScene hscene, RTCGeometryFlags flags, size_t numCurves, size_t numVertices, size_t numTimeSteps) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewHairGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::HAIR,NativeCurves::BEZIER,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewHairGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
+
+  RTCORE_API unsigned rtcNewBezierHairGeometry (RTCScene hscene, RTCGeometryFlags flags, unsigned int numCurves, unsigned int numVertices, unsigned int numTimeSteps) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewBezierHairGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::HAIR,NativeCurves::BEZIER,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewBezierHairGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
   
-  RTC_API void rtcSetGeometryMask (RTCGeometry hgeometry, unsigned int mask) 
+  RTCORE_API unsigned rtcNewBSplineHairGeometry (RTCScene hscene, RTCGeometryFlags flags, unsigned int numCurves, unsigned int numVertices, unsigned int numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryMask);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setMask(mask);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewBSplineHairGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::HAIR,NativeCurves::BSPLINE,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewBSplineHairGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometrySubdivisionMode (RTCGeometry hgeometry, unsigned topologyID, RTCSubdivisionMode mode) 
+  RTCORE_API unsigned rtcNewCurveGeometry (RTCScene hscene, RTCGeometryFlags flags, size_t numCurves, size_t numVertices, size_t numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometrySubdivisionMode);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setSubdivisionMode(topologyID,mode);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewCurveGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::SURFACE,NativeCurves::BEZIER,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewCurveGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometryVertexAttributeTopology(RTCGeometry hgeometry, unsigned int vertexAttributeID, unsigned int topologyID)
+  RTCORE_API unsigned rtcNewBezierCurveGeometry (RTCScene hscene, RTCGeometryFlags flags, unsigned int numCurves, unsigned int numVertices, unsigned int numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryVertexAttributeTopology);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setVertexAttributeTopology(vertexAttributeID, topologyID);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewBezierCurveGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::SURFACE,NativeCurves::BEZIER,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewBezierCurveGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetGeometryBuffer(RTCGeometry hgeometry, RTCBufferType type, unsigned int slot, RTCFormat format, RTCBuffer hbuffer, size_t byteOffset, size_t byteStride, size_t itemCount)
+  RTCORE_API unsigned rtcNewBSplineCurveGeometry (RTCScene hscene, RTCGeometryFlags flags, unsigned int numCurves, unsigned int numVertices, unsigned int numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    Ref<Buffer> buffer = (Buffer*)hbuffer;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryBuffer);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_HANDLE(hbuffer);
-    RTC_ENTER_DEVICE(hgeometry);
-    
-    if (geometry->device != buffer->device)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"inputs are from different devices");
-    
-    if (itemCount > 0xFFFFFFFFu)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"buffer too large");
-    
-    geometry->setBuffer(type, slot, format, buffer, byteOffset, byteStride, (unsigned int)itemCount);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewBSplineCurveGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_HAIR)
+    return scene->newCurves(NativeCurves::SURFACE,NativeCurves::BSPLINE,flags,numCurves,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewBSplineCurveGeometry is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void rtcSetSharedGeometryBuffer(RTCGeometry hgeometry, RTCBufferType type, unsigned int slot, RTCFormat format, const void* ptr, size_t byteOffset, size_t byteStride, size_t itemCount)
+  RTCORE_API unsigned rtcNewLineSegments (RTCScene hscene, RTCGeometryFlags flags, size_t numSegments, size_t numVertices, size_t numTimeSteps)
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetSharedGeometryBuffer);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    
-    if (itemCount > 0xFFFFFFFFu)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"buffer too large");
-
-    Ref<Buffer> buffer = new Buffer(geometry->device, itemCount*byteStride, (char*)ptr + byteOffset);
-    geometry->setBuffer(type, slot, format, buffer, 0, byteStride, (unsigned int)itemCount);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewLineSegments);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_LINES)
+    return scene->newLineSegments(flags,numSegments,numVertices,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewLineSegments is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
   }
 
-  RTC_API void* rtcSetNewGeometryBuffer(RTCGeometry hgeometry, RTCBufferType type, unsigned int slot, RTCFormat format, size_t byteStride, size_t itemCount)
+  RTCORE_API unsigned rtcNewSubdivisionMesh (RTCScene hscene, RTCGeometryFlags flags, size_t numFaces, size_t numEdges, size_t numVertices, 
+                                             size_t numEdgeCreases, size_t numVertexCreases, size_t numHoles, size_t numTimeSteps) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetNewGeometryBuffer);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcNewSubdivisionMesh);
+    RTCORE_VERIFY_HANDLE(hscene);
+#if defined(EMBREE_GEOMETRY_SUBDIV)
+    return scene->newSubdivisionMesh(flags,numFaces,numEdges,numVertices,numEdgeCreases,numVertexCreases,numHoles,numTimeSteps);
+#else
+    throw_RTCError(RTC_UNKNOWN_ERROR,"rtcNewSubdivisionMesh is not supported");
+#endif
+    RTCORE_CATCH_END(scene->device);
+    return -1;
+  }
 
-    if (itemCount > 0xFFFFFFFFu)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"buffer too large");
-    
-    /* vertex buffers need to get overallocated slightly as elements are accessed using SSE loads */
-    size_t bytes = itemCount*byteStride;
-    if (type == RTC_BUFFER_TYPE_VERTEX || type == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE)
-      bytes += (16 - (byteStride%16))%16;
-      
-    Ref<Buffer> buffer = new Buffer(geometry->device, bytes);
-    geometry->setBuffer(type, slot, format, buffer, 0, byteStride, (unsigned int)itemCount);
-    return buffer->data();
-    RTC_CATCH_END2(geometry);
+  RTCORE_API void rtcSetMask (RTCScene hscene, unsigned geomID, int mask) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetMask);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setMask(mask);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetBoundaryMode (RTCScene hscene, unsigned geomID, RTCBoundaryMode mode) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBoundaryMode);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setSubdivisionMode(0,(RTCSubdivisionMode)mode);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetSubdivisionMode (RTCScene hscene, unsigned geomID, unsigned topologyID, RTCSubdivisionMode mode) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetSubdivisionMode);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setSubdivisionMode(topologyID,mode);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIndexBuffer (RTCScene hscene, unsigned geomID, RTCBufferType vertexBuffer, RTCBufferType indexBuffer) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIndexBuffer);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIndexBuffer(vertexBuffer,indexBuffer);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void* rtcMapBuffer(RTCScene hscene, unsigned geomID, RTCBufferType type) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcMapBuffer);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    return scene->get_locked(geomID)->map(type);
+    RTCORE_CATCH_END(scene->device);
     return nullptr;
   }
 
-  RTC_API void* rtcGetGeometryBufferData(RTCGeometry hgeometry, RTCBufferType type, unsigned int slot)
+  RTCORE_API void rtcUnmapBuffer(RTCScene hscene, unsigned geomID, RTCBufferType type) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryBufferData);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    return geometry->getBuffer(type, slot);
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcUnmapBuffer);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->unmap(type);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetBuffer(RTCScene hscene, unsigned geomID, RTCBufferType type, const void* ptr, size_t offset, size_t stride)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBuffer);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setBuffer(type,(void*)ptr,offset,stride,-1);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetBuffer2(RTCScene hscene, unsigned geomID, RTCBufferType type, const void* ptr, size_t offset, size_t stride, size_t size)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBuffer2);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setBuffer(type,(void*)ptr,offset,stride,size);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcEnable (RTCScene hscene, unsigned geomID) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcEnable);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->enable();
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcUpdate (RTCScene hscene, unsigned geomID) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcUpdate);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->update();
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcUpdateBuffer (RTCScene hscene, unsigned geomID, RTCBufferType type) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcUpdateBuffer);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->updateBuffer(type);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcDisable (RTCScene hscene, unsigned geomID) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDisable);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->disable();
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcDeleteGeometry (RTCScene hscene, unsigned geomID) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcDeleteGeometry);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->deleteGeometry(geomID);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetTessellationRate (RTCScene hscene, unsigned geomID, float tessellationRate)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetTessellationRate);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setTessellationRate(tessellationRate);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetUserData (RTCScene hscene, unsigned geomID, void* ptr) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetUserData);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setUserData(ptr);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void* rtcGetUserData (RTCScene hscene, unsigned geomID)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcGetUserData);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    return scene->get(geomID)->getUserData(); // this call is on purpose not thread safe
+    RTCORE_CATCH_END(scene->device);
     return nullptr;
+  }
+
+  RTCORE_API void rtcSetBoundsFunction (RTCScene hscene, unsigned geomID, RTCBoundsFunc bounds)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBoundsFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setBoundsFunction(bounds);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetBoundsFunction2 (RTCScene hscene, unsigned geomID, RTCBoundsFunc2 bounds, void* userPtr)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBoundsFunction2);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setBoundsFunction2(bounds,userPtr);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetBoundsFunction3 (RTCScene hscene, unsigned geomID, RTCBoundsFunc3 bounds, void* userPtr)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetBoundsFunction3);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setBoundsFunction3(bounds,userPtr);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetDisplacementFunction (RTCScene hscene, unsigned geomID, RTCDisplacementFunc func, RTCBounds* bounds)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetDisplacementFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setDisplacementFunction(func,bounds);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetDisplacementFunction2 (RTCScene hscene, unsigned geomID, RTCDisplacementFunc2 func, RTCBounds* bounds)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetDisplacementFunction2);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setDisplacementFunction2(func,bounds);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectFunction (RTCScene hscene, unsigned geomID, RTCIntersectFunc intersect) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunction(intersect);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectFunction4 (RTCScene hscene, unsigned geomID, RTCIntersectFunc4 intersect4) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunction4);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunction4(intersect4);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectFunction8 (RTCScene hscene, unsigned geomID, RTCIntersectFunc8 intersect8) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunction8);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunction8(intersect8);
+    RTCORE_CATCH_END(scene->device);
   }
   
-  RTC_API void rtcEnableGeometry (RTCGeometry hgeometry) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcEnableGeometry);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->enable();
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcUpdateGeometryBuffer (RTCGeometry hgeometry, RTCBufferType type, unsigned int slot) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcUpdateGeometryBuffer);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->updateBuffer(type, slot);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcDisableGeometry (RTCGeometry hgeometry) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcDisableGeometry);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->disable();
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryTessellationRate (RTCGeometry hgeometry, float tessellationRate)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryTessellationRate);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setTessellationRate(tessellationRate);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryUserData (RTCGeometry hgeometry, void* ptr) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryUserData);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setUserData(ptr);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void* rtcGetGeometryUserData (RTCGeometry hgeometry)
-  {
-    Geometry* geometry = (Geometry*) hgeometry; // no ref counting here!
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryUserData);
-    RTC_VERIFY_HANDLE(hgeometry);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons !
-    return geometry->getUserData();
-    RTC_CATCH_END2(geometry);
-    return nullptr;
-  }
-
-  RTC_API void* rtcGetGeometryUserDataFromScene (RTCScene hscene, unsigned int geomID)
+  RTCORE_API void rtcSetIntersectFunction16 (RTCScene hscene, unsigned geomID, RTCIntersectFunc16 intersect16) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryUserDataFromScene);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_GEOMID(geomID);
-#endif
-    //RTC_ENTER_DEVICE(hscene); // do not enable for performance reasons
-    return scene->get(geomID)->getUserData();
-    RTC_CATCH_END2(scene);
-    return nullptr;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunction16);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunction16(intersect16);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcSetGeometryBoundsFunction (RTCGeometry hgeometry, RTCBoundsFunction bounds, void* userPtr)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryBoundsFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setBoundsFunction(bounds,userPtr);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryDisplacementFunction (RTCGeometry hgeometry, RTCDisplacementFunctionN displacement)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryDisplacementFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setDisplacementFunction(displacement);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryIntersectFunction (RTCGeometry hgeometry, RTCIntersectFunctionN intersect) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryIntersectFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setIntersectFunctionN(intersect);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryPointQueryFunction(RTCGeometry hgeometry, RTCPointQueryFunction pointQuery)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryPointQueryFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setPointQueryFunction(pointQuery);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API unsigned int rtcGetGeometryFirstHalfEdge(RTCGeometry hgeometry, unsigned int faceID)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryFirstHalfEdge);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    return geometry->getFirstHalfEdge(faceID);
-    RTC_CATCH_END2(geometry);
-    return -1;
-  }
-
-  RTC_API unsigned int rtcGetGeometryFace(RTCGeometry hgeometry, unsigned int edgeID)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryFace);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    return geometry->getFace(edgeID);
-    RTC_CATCH_END2(geometry);
-    return -1;
-  }
-
-  RTC_API unsigned int rtcGetGeometryNextHalfEdge(RTCGeometry hgeometry, unsigned int edgeID)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryNextHalfEdge);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    return geometry->getNextHalfEdge(edgeID);
-    RTC_CATCH_END2(geometry);
-    return -1;
-  }
-
-  RTC_API unsigned int rtcGetGeometryPreviousHalfEdge(RTCGeometry hgeometry, unsigned int edgeID)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryPreviousHalfEdge);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    return geometry->getPreviousHalfEdge(edgeID);
-    RTC_CATCH_END2(geometry);
-    return -1;
-  }
-
-  RTC_API unsigned int rtcGetGeometryOppositeHalfEdge(RTCGeometry hgeometry, unsigned int topologyID, unsigned int edgeID)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryOppositeHalfEdge);
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    return geometry->getOppositeHalfEdge(topologyID,edgeID);
-    RTC_CATCH_END2(geometry);
-    return -1;
-  }
-
-  RTC_API void rtcSetGeometryOccludedFunction (RTCGeometry hgeometry, RTCOccludedFunctionN occluded) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetOccludedFunctionN);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setOccludedFunctionN(occluded);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryIntersectFilterFunction (RTCGeometry hgeometry, RTCFilterFunctionN filter) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryIntersectFilterFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setIntersectionFilterFunctionN(filter);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryOccludedFilterFunction (RTCGeometry hgeometry, RTCFilterFunctionN filter) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryOccludedFilterFunction);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setOcclusionFilterFunctionN(filter);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcSetGeometryEnableFilterFunctionFromArguments (RTCGeometry hgeometry, bool enable) 
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetGeometryEnableFilterFunctionFromArguments);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->enableFilterFunctionFromArguments(enable);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcInterpolate(const RTCInterpolateArguments* const args)
-  {
-    Geometry* geometry = (Geometry*) args->geometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcInterpolate);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(args->geometry);
-#endif
-    //RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    geometry->interpolate(args);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcInterpolateN(const RTCInterpolateNArguments* const args)
-  {
-    Geometry* geometry = (Geometry*) args->geometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcInterpolateN);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(args->geometry);
-#endif
-    // RTC_ENTER_DEVICE(hgeometry); // do not enable for performance reasons
-    geometry->interpolateN(args);
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API void rtcCommitGeometry (RTCGeometry hgeometry)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcCommitGeometry);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    return geometry->commit();
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API unsigned int rtcAttachGeometry (RTCScene hscene, RTCGeometry hgeometry)
+  RTCORE_API void rtcSetIntersectFunction1Mp (RTCScene hscene, unsigned geomID, RTCIntersectFunc1Mp intersect) 
   {
     Scene* scene = (Scene*) hscene;
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcAttachGeometry);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    if (scene->device != geometry->device)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"inputs are from different devices");
-    return scene->bind(RTC_INVALID_GEOMETRY_ID,geometry);
-    RTC_CATCH_END2(scene);
-    return -1;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunction1Mp);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunction1Mp(intersect);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcAttachGeometryByID (RTCScene hscene, RTCGeometry hgeometry, unsigned int geomID)
+  RTCORE_API void rtcSetIntersectFunctionN (RTCScene hscene, unsigned geomID, RTCIntersectFuncN intersect) 
   {
     Scene* scene = (Scene*) hscene;
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcAttachGeometryByID);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_VERIFY_GEOMID(geomID);
-    RTC_ENTER_DEVICE(hscene);
-    if (scene->device != geometry->device)
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT,"inputs are from different devices");
-    scene->bind(geomID,geometry);
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectFunctionN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectFunctionN(intersect);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunction (RTCScene hscene, unsigned geomID, RTCOccludedFunc occluded) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunction(occluded);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunction4 (RTCScene hscene, unsigned geomID, RTCOccludedFunc4 occluded4) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunction4);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunction4(occluded4);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunction8 (RTCScene hscene, unsigned geomID, RTCOccludedFunc8 occluded8) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunction8);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunction8(occluded8);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunction16 (RTCScene hscene, unsigned geomID, RTCOccludedFunc16 occluded16) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunction16);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunction16(occluded16);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunction1Mp (RTCScene hscene, unsigned geomID, RTCOccludedFunc1Mp occluded) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunction1Mp);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunction1Mp(occluded);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOccludedFunctionN (RTCScene hscene, unsigned geomID, RTCOccludedFuncN occluded) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOccludedFunctionN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOccludedFunctionN(occluded);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectionFilterFunction (RTCScene hscene, unsigned geomID, RTCFilterFunc intersect) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectionFilterFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectionFilterFunction(intersect);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectionFilterFunction4 (RTCScene hscene, unsigned geomID, RTCFilterFunc4 filter4) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectionFilterFunction4);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectionFilterFunction4(filter4);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetIntersectionFilterFunction8 (RTCScene hscene, unsigned geomID, RTCFilterFunc8 filter8) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectionFilterFunction8);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectionFilterFunction8(filter8);
+    RTCORE_CATCH_END(scene->device);
   }
   
-  RTC_API void rtcDetachGeometry (RTCScene hscene, unsigned int geomID)
+  RTCORE_API void rtcSetIntersectionFilterFunction16 (RTCScene hscene, unsigned geomID, RTCFilterFunc16 filter16) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcDetachGeometry);
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_GEOMID(geomID);
-    RTC_ENTER_DEVICE(hscene);
-    scene->detachGeometry(geomID);
-    RTC_CATCH_END2(scene);
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectionFilterFunction16);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectionFilterFunction16(filter16);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API void rtcRetainGeometry (RTCGeometry hgeometry)
+  RTCORE_API void rtcSetIntersectionFilterFunctionN (RTCScene hscene, unsigned geomID, RTCFilterFuncN filterN) 
   {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcRetainGeometry);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->refInc();
-    RTC_CATCH_END2(geometry);
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetIntersectionFilterFunctionN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setIntersectionFilterFunctionN(filterN);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOcclusionFilterFunction (RTCScene hscene, unsigned geomID, RTCFilterFunc intersect) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOcclusionFilterFunction);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOcclusionFilterFunction(intersect);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOcclusionFilterFunction4 (RTCScene hscene, unsigned geomID, RTCFilterFunc4 filter4) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOcclusionFilterFunction4);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOcclusionFilterFunction4(filter4);
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcSetOcclusionFilterFunction8 (RTCScene hscene, unsigned geomID, RTCFilterFunc8 filter8) 
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOcclusionFilterFunction8);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOcclusionFilterFunction8(filter8);
+    RTCORE_CATCH_END(scene->device);
   }
   
-  RTC_API void rtcReleaseGeometry (RTCGeometry hgeometry)
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcReleaseGeometry);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->refDec();
-    RTC_CATCH_END2(geometry);
-  }
-
-  RTC_API RTCGeometry rtcGetGeometry (RTCScene hscene, unsigned int geomID)
+  RTCORE_API void rtcSetOcclusionFilterFunction16 (RTCScene hscene, unsigned geomID, RTCFilterFunc16 filter16) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometry);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_GEOMID(geomID);
-#endif
-    //RTC_ENTER_DEVICE(hscene); // do not enable for performance reasons
-    return (RTCGeometry) scene->get(geomID);
-    RTC_CATCH_END2(scene);
-    return nullptr;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOcclusionFilterFunction16);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOcclusionFilterFunction16(filter16);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API RTCGeometry rtcGetGeometryThreadSafe (RTCScene hscene, unsigned int geomID)
+  RTCORE_API void rtcSetOcclusionFilterFunctionN (RTCScene hscene, unsigned geomID, RTCFilterFuncN filterN) 
   {
     Scene* scene = (Scene*) hscene;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetGeometryThreadSafe);
-#if defined(DEBUG)
-    RTC_VERIFY_HANDLE(hscene);
-    RTC_VERIFY_GEOMID(geomID);
-#endif
-    Ref<Geometry> geom = scene->get_locked(geomID);
-    return (RTCGeometry) geom.ptr; 
-    RTC_CATCH_END2(scene);
-    return nullptr;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcSetOcclusionFilterFunctionN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get_locked(geomID)->setOcclusionFilterFunctionN(filterN);
+    RTCORE_CATCH_END(scene->device);
   }
 
-  RTC_API const char* rtcGetErrorString(RTCError error)
+  RTCORE_API void rtcInterpolate(RTCScene hscene, unsigned geomID, unsigned primID, float u, float v, 
+                                 RTCBufferType buffer,
+                                 float* P, float* dPdu, float* dPdv, size_t numFloats)
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcGetErrorString);
-    return Device::getErrorString(error);
-    RTC_CATCH_END(nullptr);
-    return nullptr;
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcInterpolate);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get(geomID)->interpolate(primID,u,v,buffer,P,dPdu,dPdv,nullptr,nullptr,nullptr,numFloats); // this call is on purpose not thread safe
+    RTCORE_CATCH_END(scene->device);
+  }
+
+  RTCORE_API void rtcInterpolate2(RTCScene hscene, unsigned geomID, unsigned primID, float u, float v, 
+                                  RTCBufferType buffer,
+                                  float* P, float* dPdu, float* dPdv, 
+                                  float* ddPdudu, float* ddPdvdv, float* ddPdudv, 
+                                  size_t numFloats)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcInterpolate);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get(geomID)->interpolate(primID,u,v,buffer,P,dPdu,dPdv,ddPdudu,ddPdvdv,ddPdudv,numFloats); // this call is on purpose not thread safe
+    RTCORE_CATCH_END(scene->device);
   }
 
 
-RTC_NAMESPACE_END
+#if defined (EMBREE_RAY_PACKETS)
+  RTCORE_API void rtcInterpolateN(RTCScene hscene, unsigned geomID, 
+                                  const void* valid_i, const unsigned* primIDs, const float* u, const float* v, size_t numUVs, 
+                                  RTCBufferType buffer,
+                                  float* P, float* dPdu, float* dPdv, size_t numFloats)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcInterpolateN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get(geomID)->interpolateN(valid_i,primIDs,u,v,numUVs,buffer,P,dPdu,dPdv,nullptr,nullptr,nullptr,numFloats); // this call is on purpose not thread safe
+    RTCORE_CATCH_END(scene->device);
+  }
+#endif
+
+#if defined (EMBREE_RAY_PACKETS)
+  RTCORE_API void rtcInterpolateN2(RTCScene hscene, unsigned geomID, 
+                                   const void* valid_i, const unsigned* primIDs, const float* u, const float* v, size_t numUVs, 
+                                   RTCBufferType buffer,
+                                   float* P, float* dPdu, float* dPdv, 
+                                   float* ddPdudu, float* ddPdvdv, float* ddPdudv, 
+                                   size_t numFloats)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTCORE_CATCH_BEGIN;
+    RTCORE_TRACE(rtcInterpolateN);
+    RTCORE_VERIFY_HANDLE(hscene);
+    RTCORE_VERIFY_GEOMID(geomID);
+    scene->get(geomID)->interpolateN(valid_i,primIDs,u,v,numUVs,buffer,P,dPdu,dPdv,ddPdudu,ddPdvdv,ddPdudv,numFloats); // this call is on purpose not thread safe
+    RTCORE_CATCH_END(scene->device);
+  }
+#endif
+#endif
+}
+}

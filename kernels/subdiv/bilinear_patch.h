@@ -8,6 +8,8 @@
 
 namespace embree
 {
+namespace isa
+{
   template<typename Vertex, typename Vertex_t = Vertex>
     class __aligned(64) BilinearPatchT
     {
@@ -188,4 +190,5 @@ namespace embree
     };
   
   typedef BilinearPatchT<Vec3fa,Vec3fa_t> BilinearPatch3fa;
+}
 }

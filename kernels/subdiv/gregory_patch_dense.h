@@ -7,6 +7,8 @@
 
 namespace embree
 {  
+namespace isa
+{
   class __aligned(64) DenseGregoryPatch3fa
   {
     typedef Vec3fa Vec3fa_4x4[4][4];
@@ -110,4 +112,5 @@ namespace embree
   private:
     Vec3ff matrix[4][4]; // f_p/m points are stored in 4th component
   };
+}
 }

@@ -12,7 +12,9 @@
 
 namespace embree
 {
-  class FastAllocator
+namespace isa
+{
+  class FastAllocator 
   {
     /*! maximum supported alignment */
     static const size_t maxAlignment = 64;
@@ -1002,4 +1004,5 @@ namespace embree
 
     mvector<PrimRef> primrefarray;     //!< primrefarray used to allocate nodes
   };
+}
 }

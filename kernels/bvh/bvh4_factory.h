@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! BVH4 instantiations */
   class BVH4Factory : public BVHFactory
   {
@@ -315,4 +317,5 @@ namespace embree
     DEFINE_ISA_FUNCTION(Builder*,BVH4BuilderTwoLevelInstanceSAH,void* COMMA Scene* COMMA Geometry::GTypeMask COMMA bool);
     DEFINE_ISA_FUNCTION(Builder*,BVH4BuilderTwoLevelInstanceArraySAH,void* COMMA Scene* COMMA Geometry::GTypeMask COMMA bool);
   };
+}
 }

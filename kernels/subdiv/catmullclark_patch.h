@@ -8,6 +8,8 @@
 
 namespace embree
 {
+namespace isa
+{
   template<typename Vertex, typename Vertex_t = Vertex>
     class __aligned(64) CatmullClarkPatchT
     {
@@ -559,4 +561,5 @@ namespace embree
     };
   
   typedef GeneralCatmullClarkPatchT<Vec3fa,Vec3fa_t> GeneralCatmullClarkPatch3fa;
+}
 }

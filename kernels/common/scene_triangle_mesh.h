@@ -8,6 +8,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! Triangle Mesh */
   struct TriangleMesh : public Geometry
   {
@@ -348,4 +350,5 @@ namespace embree
   }
 
   DECLARE_ISA_FUNCTION(TriangleMesh*, createTriangleMesh, Device*);
+}
 }

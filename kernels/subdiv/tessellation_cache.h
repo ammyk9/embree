@@ -1,5 +1,18 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
@@ -18,6 +31,8 @@
 
 namespace embree
 {
+//namespace isa
+//{
   class SharedTessellationCacheStats
   {
   public:
@@ -43,7 +58,7 @@ namespace embree
 
  struct __aligned(64) ThreadWorkState 
  {
-   ALIGNED_STRUCT_(64);
+   ALIGNED_STRUCT;
 
    std::atomic<size_t> counter;
    ThreadWorkState* next;
@@ -63,7 +78,7 @@ namespace embree
    static const size_t NUM_CACHE_SEGMENTS              = 8;
    static const size_t NUM_PREALLOC_THREAD_WORK_STATES = 512;
    static const size_t COMMIT_INDEX_SHIFT              = 32+8;
-#if defined(__64BIT__)
+#if defined(__X86_64__)
    static const size_t REF_TAG_MASK                    = 0xffffffffff;
 #else
    static const size_t REF_TAG_MASK                    = 0x7FFFFFFF;
@@ -275,7 +290,8 @@ namespace embree
    __forceinline size_t alloc(const size_t blocks)
    {
      if (unlikely(blocks >= switch_block_threshold))
-       throw_RTCError(RTC_ERROR_INVALID_OPERATION,"allocation exceeds size of tessellation cache segment");
+       //throw_RTCError(RTC_INVALID_OPERATION,"allocation exceeds size of tessellation cache segment");
+       throw std::runtime_error("allocation exceeds size of tessellation cache segment");
 
      assert(blocks < switch_block_threshold);
      size_t index = next_block.fetch_add(blocks);
@@ -322,4 +338,5 @@ namespace embree
 
    static SharedLazyTessellationCache sharedLazyTessellationCache;
  };
+//}
 }

@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   struct __aligned(16) GridRange
   {
     unsigned int u_start;
@@ -93,4 +95,5 @@ namespace embree
       return children;      
     }
   };
+}
 }

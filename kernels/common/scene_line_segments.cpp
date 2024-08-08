@@ -1,257 +1,149 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "scene_line_segments.h"
 #include "scene.h"
 
 namespace embree
 {
-#if defined(EMBREE_LOWEST_ISA)
-
-  LineSegments::LineSegments (Device* device, Geometry::GType gtype)
-    : Geometry(device,gtype,0,1), tessellationRate(4)
+namespace isa
+{
+  LineSegments::LineSegments (Scene* parent, RTCGeometryFlags flags, size_t numPrimitives, size_t numVertices, size_t numTimeSteps)
+    : Geometry(parent,LINE_SEGMENTS,numPrimitives,numTimeSteps,flags)
   {
+    segments.init(parent->device,numPrimitives,sizeof(int));
     vertices.resize(numTimeSteps);
+    for (size_t i=0; i<numTimeSteps; i++) {
+      vertices[i].init(parent->device,numVertices,sizeof(Vec3fa));
+    }
+    enabling();
+  }
+
+  void LineSegments::enabling()
+  {
+    if (numTimeSteps == 1) parent->world.numLineSegments += numPrimitives;
+    else                   parent->worldMB.numLineSegments += numPrimitives;
+  }
+
+  void LineSegments::disabling()
+  {
+    if (numTimeSteps == 1) parent->world.numLineSegments -= numPrimitives;
+    else                   parent->worldMB.numLineSegments -= numPrimitives;
   }
 
   void LineSegments::setMask (unsigned mask)
   {
+    if (parent->isStatic() && parent->isBuild())
+      throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
+
     this->mask = mask;
     Geometry::update();
   }
 
-  void LineSegments::setNumTimeSteps (unsigned int numTimeSteps)
+  void LineSegments::setBuffer(RTCBufferType type, void* ptr, size_t offset, size_t stride, size_t size)
   {
-    vertices.resize(numTimeSteps);
-    if (getCurveType() == GTY_SUBTYPE_ORIENTED_CURVE)
-      normals.resize(numTimeSteps);
-    Geometry::setNumTimeSteps(numTimeSteps);
-  }
+    if (parent->isStatic() && parent->isBuild())
+      throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
 
-  void LineSegments::setVertexAttributeCount (unsigned int N)
-  {
-    vertexAttribs.resize(N);
-    Geometry::update();
-  }
-  
-  void LineSegments::setBuffer(RTCBufferType type, unsigned int slot, RTCFormat format, const Ref<Buffer>& buffer, size_t offset, size_t stride, unsigned int num)
-  {
     /* verify that all accesses are 4 bytes aligned */
-    if ((type != RTC_BUFFER_TYPE_FLAGS) && (((size_t(buffer->getPtr()) + offset) & 0x3) || (stride & 0x3)))
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION, "data must be 4 bytes aligned");
+    if (((size_t(ptr) + offset) & 0x3) || (stride & 0x3))
+      throw_RTCError(RTC_INVALID_OPERATION,"data must be 4 bytes aligned");
 
-    if (type == RTC_BUFFER_TYPE_VERTEX)
+    unsigned bid = type & 0xFFFF;
+    if (type >= RTC_VERTEX_BUFFER0 && type < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) 
     {
-      if (format != RTC_FORMAT_FLOAT4)
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid vertex buffer format");
-
-      if (slot >= vertices.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid vertex buffer slot");
-      
-      vertices[slot].set(buffer, offset, stride, num, format);
-      vertices[slot].checkPadding16();
+      size_t t = type - RTC_VERTEX_BUFFER0;
+      vertices[t].set(ptr,offset,stride,size);
+      vertices[t].checkPadding16();
+      vertices0 = vertices[0];
+    } 
+    else if (type >= RTC_USER_VERTEX_BUFFER0 && type < RTC_USER_VERTEX_BUFFER0+RTC_MAX_USER_VERTEX_BUFFERS)
+    {
+      if (bid >= userbuffers.size()) userbuffers.resize(bid+1);
+      userbuffers[bid] = APIBuffer<char>(parent->device,numVertices(),stride);
+      userbuffers[bid].set(ptr,offset,stride,size);
+      userbuffers[bid].checkPadding16();
     }
-    else if (type == RTC_BUFFER_TYPE_NORMAL)
+    else if (type == RTC_INDEX_BUFFER) 
     {
-      if (getCurveType() != GTY_SUBTYPE_ORIENTED_CURVE)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown buffer type");
-        
-      if (format != RTC_FORMAT_FLOAT3)
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid normal buffer format");
-
-      if (slot >= normals.size())
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid normal buffer slot");
-      
-      normals[slot].set(buffer, offset, stride, num, format);
-      normals[slot].checkPadding16();
-    }
-    else if (type == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE)
-    {
-      if (format < RTC_FORMAT_FLOAT || format > RTC_FORMAT_FLOAT16)
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid vertex attribute buffer format");
-
-      if (slot >= vertexAttribs.size())
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid vertex attribute buffer slot");
-      
-      vertexAttribs[slot].set(buffer, offset, stride, num, format);
-      vertexAttribs[slot].checkPadding16();
-    }
-    else if (type == RTC_BUFFER_TYPE_INDEX)
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      if (format != RTC_FORMAT_UINT)
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid index buffer format");
-
-      segments.set(buffer, offset, stride, num, format);
-      setNumPrimitives(num);
-    }
-    else if (type == RTC_BUFFER_TYPE_FLAGS)
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      if (format != RTC_FORMAT_UCHAR)
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid flag buffer format");
-
-      flags.set(buffer, offset, stride, num, format);
-      flags.userData = 1; // to encode that app manages this buffer
+      if (size != (size_t)-1) disabling();
+      segments.set(ptr,offset,stride,size); 
+      setNumPrimitives(size);
+      if (size != (size_t)-1) enabling();
     }
     else
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown buffer type");
+      throw_RTCError(RTC_INVALID_ARGUMENT,"unknown buffer type");
   }
 
-  void* LineSegments::getBuffer(RTCBufferType type, unsigned int slot)
+  void* LineSegments::map(RTCBufferType type)
   {
-    if (type == RTC_BUFFER_TYPE_INDEX)
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      return segments.getPtr();
+    if (parent->isStatic() && parent->isBuild()) {
+      throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
+      return nullptr;
     }
-    else if (type == RTC_BUFFER_TYPE_VERTEX)
-    {
-      if (slot >= vertices.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      return vertices[slot].getPtr();
+
+    if (type == RTC_INDEX_BUFFER) {
+      return segments.map(parent->numMappedBuffers);
     }
-    else if (type == RTC_BUFFER_TYPE_NORMAL)
-    {
-      if (slot >= normals.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      return normals[slot].getPtr();
+    else if (type >= RTC_VERTEX_BUFFER0 && type < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) {
+      return vertices[type - RTC_VERTEX_BUFFER0].map(parent->numMappedBuffers);
     }
-    else if (type == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE)
-    {
-      if (slot >= vertexAttribs.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      return vertexAttribs[slot].getPtr();
-    }
-    else if (type == RTC_BUFFER_TYPE_FLAGS) 
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      return flags.getPtr();
-    }
-    else
-    {
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown buffer type");
+    else {
+      throw_RTCError(RTC_INVALID_ARGUMENT,"unknown buffer type"); 
       return nullptr;
     }
   }
 
-  void LineSegments::updateBuffer(RTCBufferType type, unsigned int slot)
+  void LineSegments::unmap(RTCBufferType type)
   {
-    if (type == RTC_BUFFER_TYPE_INDEX)
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      segments.setModified();
-    }
-    else if (type == RTC_BUFFER_TYPE_VERTEX)
-    {
-      if (slot >= vertices.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      vertices[slot].setModified();
-    }
-    else if (type == RTC_BUFFER_TYPE_NORMAL)
-    {
-      if (slot >= normals.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      normals[slot].setModified();
-    }
-    else if (type == RTC_BUFFER_TYPE_VERTEX_ATTRIBUTE)
-    {
-      if (slot >= vertexAttribs.size())
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      vertexAttribs[slot].setModified();
-    }
-    else if (type == RTC_BUFFER_TYPE_FLAGS) 
-    {
-      if (slot != 0)
-        throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "invalid buffer slot");
-      flags.setModified();
-    }
-    else
-    {
-      throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "unknown buffer type");
-    }
+    if (parent->isStatic() && parent->isBuild())
+      throw_RTCError(RTC_INVALID_OPERATION,"static geometries cannot get modified");
 
-    Geometry::update();
+    if (type == RTC_INDEX_BUFFER) {
+      segments.unmap(parent->numMappedBuffers);
+    }
+    else if (type >= RTC_VERTEX_BUFFER0 && type < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) {
+      vertices[type - RTC_VERTEX_BUFFER0].unmap(parent->numMappedBuffers);
+      vertices0 = vertices[0];
+    }
+    else {
+      throw_RTCError(RTC_INVALID_ARGUMENT,"unknown buffer type"); 
+    }
   }
 
-  void LineSegments::setTessellationRate(float N) {
-    tessellationRate = clamp((int)N,1,16);
-  }
-
-  void LineSegments::setMaxRadiusScale(float s) {
-    maxRadiusScale = s;
-  }
-
-  void LineSegments::commit() 
+  void LineSegments::immutable ()
   {
-    /* verify that stride of all time steps are identical */
-    for (unsigned int t=0; t<numTimeSteps; t++)
-      if (vertices[t].getStride() != vertices[0].getStride())
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"stride of vertex buffers have to be identical for each time step");
-
-    for (const auto& buffer : normals)
-      if (buffer.getStride() != normals[0].getStride())
-        throw_RTCError(RTC_ERROR_INVALID_OPERATION,"stride of normal buffers have to be identical for each time step");
-
-    vertices0 = vertices[0];
-    if (getCurveType() == GTY_SUBTYPE_ORIENTED_CURVE)
-      normals0 = normals[0];
-
-    /* if no flags buffer is specified we manage and calculate the flags buffer */
-    if (!flags.buffer) flags.userData = 0; // to encode that we manage this buffer
-    bool recompute_flags_buffer = segments.isLocalModified();
-
-    /* resize flags buffer if number of primitives changed */
-    if (!flags.userData && (!flags.buffer || flags.size() != numPrimitives))
-    {
-      Ref<Buffer> buffer = new Buffer(device, numPrimitives*sizeof(char));
-      flags.set(buffer, 0, sizeof(char), numPrimitives, RTC_FORMAT_UCHAR);
-      recompute_flags_buffer = true;
-    }
-
-    /* recalculate the flags buffer if index buffer got modified */
-    if (!flags.userData && recompute_flags_buffer)
-    {
-      bool hasLeft = false;
-      for (size_t i=0; i<numPrimitives; i++) {
-        bool hasRight = (i==numPrimitives-1) ? false : segment(i+1) == segment(i)+1;
-        flags[i]  = hasLeft  * RTC_CURVE_FLAG_NEIGHBOR_LEFT;
-        flags[i] |= hasRight * RTC_CURVE_FLAG_NEIGHBOR_RIGHT;
-        hasLeft = hasRight;
-      }
-    }
-    segments.clearLocalModified();
-
-    Geometry::commit();
-  }
-  
-  void LineSegments::addElementsToCount (GeometryCounts & counts) const 
-  {
-    if (numTimeSteps == 1) counts.numLineSegments += numPrimitives;
-    else                   counts.numMBLineSegments += numPrimitives;
+    const bool freeIndices  = !parent->needLineIndices;
+    const bool freeVertices = !parent->needLineVertices;
+    if (freeIndices) segments.free();
+    if (freeVertices )
+      for (auto& buffer : vertices)
+        buffer.free();
   }
 
   bool LineSegments::verify ()
   { 
     /*! verify consistent size of vertex arrays */
-    if (vertices.size() == 0)
-      return false;
-    
+    if (vertices.size() == 0) return false;
     for (const auto& buffer : vertices)
       if (buffer.size() != numVertices())
         return false;
 
-    for (const auto& buffer : normals)
-      if (vertices[0].size() != buffer.size())
-        return false;
-
     /*! verify segment indices */
-    for (unsigned int i=0; i<size(); i++) {
+    for (size_t i=0; i<numPrimitives; i++) {
       if (segments[i]+1 >= numVertices()) return false;
     }
 
@@ -265,17 +157,41 @@ namespace embree
       }
     }
     return true;
-  } 
-
-  void LineSegments::interpolate(const RTCInterpolateArguments* const args) {
-    interpolate_impl<4>(args);
   }
+
+  void LineSegments::interpolate(unsigned primID, float u, float v, RTCBufferType buffer, float* P, float* dPdu, float* dPdv, float* ddPdudu, float* ddPdvdv, float* ddPdudv, size_t numFloats)
+  {
+    /* test if interpolation is enabled */
+#if defined(DEBUG)
+    if ((parent->aflags & RTC_INTERPOLATE) == 0)
+      throw_RTCError(RTC_INVALID_OPERATION,"rtcInterpolate can only get called when RTC_INTERPOLATE is enabled for the scene");
 #endif
 
-  namespace isa
-  {
-    LineSegments* createLineSegments(Device* device, Geometry::GType gtype) {
-      return new LineSegmentsISA(device,gtype);
+
+    /* calculate base pointer and stride */
+    assert((buffer >= RTC_VERTEX_BUFFER0 && buffer < RTCBufferType(RTC_VERTEX_BUFFER0 + numTimeSteps)) ||
+           (buffer >= RTC_USER_VERTEX_BUFFER0 && buffer <= RTC_USER_VERTEX_BUFFER1));
+    const char* src = nullptr;
+    size_t stride = 0;
+    if (buffer >= RTC_USER_VERTEX_BUFFER0) {
+      src    = userbuffers[buffer&0xFFFF].getPtr();
+      stride = userbuffers[buffer&0xFFFF].getStride();
+    } else {
+      src    = vertices[buffer&0xFFFF].getPtr();
+      stride = vertices[buffer&0xFFFF].getStride();
+    }
+    
+    for (size_t i=0; i<numFloats; i+=VSIZEX)
+    {
+      const size_t ofs = i*sizeof(float);
+      const size_t segment = segments[primID];
+      const vboolx valid = vintx((int)i)+vintx(step) < vintx(numFloats);
+      const vfloatx p0 = vfloatx::loadu(valid,(float*)&src[(segment+0)*stride+ofs]);
+      const vfloatx p1 = vfloatx::loadu(valid,(float*)&src[(segment+1)*stride+ofs]);
+      if (P      ) vfloatx::storeu(valid,P+i,lerp(p0,p1,u));
+      if (dPdu   ) vfloatx::storeu(valid,dPdu+i,p1-p0);
+      if (ddPdudu) vfloatx::storeu(valid,dPdu+i,vfloatx(zero));
     }
   }
+}
 }

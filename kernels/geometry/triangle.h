@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* Precalculated representation for M triangles. Stores for each
      triangle a base vertex, two edges, and the geometry normal to
      speed up intersection calculations */
@@ -21,7 +23,7 @@ namespace embree
       size_t sizeTotal(const char* This) const;
       size_t getBytes(const char* This) const;
     };
-    static Type type;
+    static const Type& type();
     
   public:
 
@@ -155,8 +157,9 @@ namespace embree
     vuint<M> primIDs; // primitive IDs
   };
 
-  template<int M>
-  typename TriangleM<M>::Type TriangleM<M>::type;
+  //template<int M>
+  //typename TriangleM<M>::Type TriangleM<M>::type;
 
   typedef TriangleM<4> Triangle4;
+}
 }

@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! helper structure for the implementation of the profile functions below */
   struct ProfileTimer
   {
@@ -157,3 +159,5 @@ namespace embree
       timer.print(numElements);
     }
 }
+}
+

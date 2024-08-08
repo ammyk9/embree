@@ -7,6 +7,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /*! User geometry with user defined intersection functions */
   struct UserGeometry : public AccelSet
   {
@@ -93,4 +95,5 @@ namespace embree
   }
   
   DECLARE_ISA_FUNCTION(UserGeometry*, createUserGeometry, Device*);
+}
 }

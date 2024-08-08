@@ -1,5 +1,18 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #pragma once
 
@@ -9,95 +22,70 @@
 
 namespace embree
 {
+  struct SceneInterface;
+  struct DeviceInterface
+  {
+    virtual ~DeviceInterface() {};
+    virtual void setParameter1i(const RTCParameter parm, ssize_t val) = 0;
+    virtual ssize_t getParameter1i(const RTCParameter parm) = 0;
+    virtual RTCError getDeviceErrorCode() = 0;
+    virtual void setErrorFunction(RTCErrorFunc fptr) = 0;
+    virtual void setErrorFunction(RTCErrorFunc2 fptr, void* uptr) = 0;
+    virtual void setMemoryMonitorFunction(RTCMemoryMonitorFunc fptr) = 0;
+    virtual void setMemoryMonitorFunction(RTCMemoryMonitorFunc2 fptr, void* uptr) = 0;
+    virtual void processError(RTCError error, const char* str) = 0;
+    virtual SceneInterface* newScene (RTCSceneFlags flags, RTCAlgorithmFlags aflags) = 0;
+
+    static size_t getMaxNumThreads();
+    static size_t getMaxCacheSize();
+    static void setCacheSize(DeviceInterface* device, size_t bytes);
+    static void setNumThreads(DeviceInterface* device, size_t numThreads);
+    static bool unsetNumThreads(DeviceInterface* device);
+
+    /*! some variables that can be set via rtcSetParameter1i for debugging purposes */
+  public:
+    static ssize_t debug_int0;
+    static ssize_t debug_int1;
+    static ssize_t debug_int2;
+    static ssize_t debug_int3;
+  };
+
+namespace isa
+{
   class BVH4Factory;
   class BVH8Factory;
-  struct TaskArena;
+  class InstanceFactory;
 
-  class Device : public State, public MemoryMonitorInterface
+  class Device : public DeviceInterface, public State, public MemoryMonitorInterface
   {
-    ALIGNED_CLASS_(16);
-    
-  public:
-    
-    /*! allocator that performs unified shared memory allocations */
-    template<typename T, size_t alignment>
-    struct allocator
-    {
-      typedef T value_type;
-      typedef T* pointer;
-      typedef const T* const_pointer;
-      typedef T& reference;
-      typedef const T& const_reference;
-      typedef std::size_t size_type;
-      typedef std::ptrdiff_t difference_type;
-      
-      allocator() {}
-      
-      allocator(Device* device)
-        : device(device) {}
-      
-      __forceinline pointer allocate( size_type n ) {
-        assert(device);
-        return (pointer) device->malloc(n*sizeof(T),alignment);
-      }
-      
-      __forceinline void deallocate( pointer p, size_type n ) {
-        if (device) device->free(p);
-      }
-      
-      __forceinline void construct( pointer p, const_reference val ) {
-        new (p) T(val);
-      }
-      
-      __forceinline void destroy( pointer p ) {
-        p->~T();
-      }
-      
-      Device* device = nullptr;
-    };
-
-    /*! vector class that performs aligned allocations from Device object */
-    template<typename T>
-    using vector = vector_t<T,allocator<T,std::alignment_of<T>::value>>;
-
-    template<typename T, size_t alignment>
-    using avector = vector_t<T,allocator<T,alignment>>;
+    ALIGNED_CLASS;
 
   public:
 
     /*! Device construction */
-    Device (const char* cfg);
+    Device (const State& state);
+
+    /*! Device construction */
+    Device (const char* cfg, bool singledevice);
 
     /*! Device destruction */
     virtual ~Device ();
 
+    void init();
+
     /*! prints info about the device */
     void print();
 
+    virtual SceneInterface* newScene (RTCSceneFlags flags, RTCAlgorithmFlags aflags);
+
     /*! sets the error code */
-    void setDeviceErrorCode(RTCError error, std::string const& msg = "");
+    void setDeviceErrorCode(RTCError error);
 
     /*! returns and clears the error code */
     RTCError getDeviceErrorCode();
 
-    /*! Returns the string representation for the error code. For example, for RTC_ERROR_UNKNOWN the string "RTC_ERROR_UNKNOWN" will be returned. */
-    static char* getDeviceErrorString();
-
-    /*! returns the last error message */
-    const char* getDeviceLastErrorMessage();
-
-    /*! sets the error code */
-    static void setThreadErrorCode(RTCError error, std::string const& msg = "");
-
-    /*! returns and clears the error code */
-    static RTCError getThreadErrorCode();
-
-
-    /*! returns the last error message */
-    static const char* getThreadLastErrorMessage();
-
     /*! processes error codes, do not call directly */
-    static void process_error(Device* device, RTCError error, const char* str);
+    virtual void processError(RTCError error, const char* str);
 
     /*! invokes the memory monitor callback */
     void memoryMonitor(ssize_t bytes, bool post);
@@ -105,23 +93,11 @@ namespace embree
     /*! sets the size of the software cache. */
     void setCacheSize(size_t bytes);
 
-    /*! sets a property */
-    void setProperty(const RTCDeviceProperty prop, ssize_t val);
+    /*! configures some parameter */
+    void setParameter1i(const RTCParameter parm, ssize_t val);
 
-    /*! gets a property */
-    ssize_t getProperty(const RTCDeviceProperty prop);
-
-    /*! enter device by setting up some global state */
-    virtual void enter() {}
-
-    /*! leave device by setting up some global state */
-    virtual void leave() {}
-
-    /*! buffer allocation */
-    virtual void* malloc(size_t size, size_t align);
-
-    /*! buffer deallocation */
-    virtual void free(void* ptr);
+    /*! returns some configuration */
+    ssize_t getParameter1i(const RTCParameter parm);
 
   private:
 
@@ -131,81 +107,59 @@ namespace embree
     /*! shuts down the tasking system */
     void exitTaskingSystem();
 
-    std::unique_ptr<TaskArena> arena;
-
   public:
+    ErrorHandler errorHandler;
 
-    // use tasking system arena to execute func
-    void execute(bool join, const std::function<void()>& func);
-
-    /*! some variables that can be set via rtcSetParameter1i for debugging purposes */
-  public:
-    static ssize_t debug_int0;
-    static ssize_t debug_int1;
-    static ssize_t debug_int2;
-    static ssize_t debug_int3;
-
-  public:
+    std::unique_ptr<InstanceFactory> instance_factory;
     std::unique_ptr<BVH4Factory> bvh4_factory;
-#if defined(EMBREE_TARGET_SIMD8)
+#if defined(__AVX__)
     std::unique_ptr<BVH8Factory> bvh8_factory;
 #endif
-
-  private:
-    static const std::vector<std::string> error_strings;
-
-  public:
-    static const char* getErrorString(RTCError error);
-
-  };
-
-#if defined(EMBREE_SYCL_SUPPORT)
-     
-  class DeviceGPU : public Device
-  {
-  public:
-
-    DeviceGPU(sycl::context sycl_context, const char* cfg);
-    ~DeviceGPU();
-
-    virtual void enter() override;
-    virtual void leave() override;
-    virtual void* malloc(size_t size, size_t align) override;
-    virtual void free(void* ptr) override;
-
-    /* set SYCL device */
-    void setSYCLDevice(const sycl::device sycl_device);
-
-  private:
-    sycl::context gpu_context;
-    sycl::device  gpu_device;
-        
-    unsigned int gpu_maxWorkGroupSize;
-    unsigned int gpu_maxComputeUnits;
-
-  public:
-    void* dispatchGlobalsPtr = nullptr;
-
-  public:
-    inline sycl::device  &getGPUDevice()  { return gpu_device; }        
-    inline sycl::context &getGPUContext() { return gpu_context; }    
-
-    inline unsigned int getGPUMaxWorkGroupSize() { return gpu_maxWorkGroupSize; }
-
-    void init_rthw_level_zero();
-    void init_rthw_opencl();
-  };
-
+    
+#if USE_TASK_ARENA
+    std::unique_ptr<tbb::task_arena> arena;
 #endif
+    
+    /* ray streams filter */
+    RayStreamFilterFuncs rayStreamFilters;
 
-  struct DeviceEnterLeave
-  {
-    DeviceEnterLeave (RTCDevice hdevice);
-    DeviceEnterLeave (RTCScene hscene);
-    DeviceEnterLeave (RTCGeometry hgeometry);
-    DeviceEnterLeave (RTCBuffer hbuffer);
-    ~DeviceEnterLeave();
-  private:
-    Device* device;
+ public:
+    void setErrorFunction(RTCErrorFunc fptr) 
+    {
+      error_function = fptr;
+      error_function2 = nullptr;
+      error_function_userptr = nullptr;
+    }
+    
+    void setErrorFunction(RTCErrorFunc2 fptr, void* uptr) 
+    {
+      error_function = nullptr;
+      error_function2 = fptr;
+      error_function_userptr = uptr;
+    }
+
+    RTCErrorFunc error_function;
+    RTCErrorFunc2 error_function2;
+    void* error_function_userptr;
+
+  public:
+    void setMemoryMonitorFunction(RTCMemoryMonitorFunc fptr) 
+    {
+      memory_monitor_function = fptr;
+      memory_monitor_function2 = nullptr;
+      memory_monitor_userptr = nullptr;
+    }
+    
+    void setMemoryMonitorFunction(RTCMemoryMonitorFunc2 fptr, void* uptr) 
+    {
+      memory_monitor_function = nullptr;
+      memory_monitor_function2 = fptr;
+      memory_monitor_userptr = uptr;
+    }
+      
+    RTCMemoryMonitorFunc memory_monitor_function;
+    RTCMemoryMonitorFunc2 memory_monitor_function2;
+    void* memory_monitor_userptr;
   };
+}
 }

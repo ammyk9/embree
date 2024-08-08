@@ -1,23 +1,34 @@
-// Copyright 2009-2021 Intel Corporation
-// SPDX-License-Identifier: Apache-2.0
+// ======================================================================== //
+// Copyright 2009-2017 Intel Corporation                                    //
+//                                                                          //
+// Licensed under the Apache License, Version 2.0 (the "License");          //
+// you may not use this file except in compliance with the License.         //
+// You may obtain a copy of the License at                                  //
+//                                                                          //
+//     http://www.apache.org/licenses/LICENSE-2.0                           //
+//                                                                          //
+// Unless required by applicable law or agreed to in writing, software      //
+// distributed under the License is distributed on an "AS IS" BASIS,        //
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. //
+// See the License for the specific language governing permissions and      //
+// limitations under the License.                                           //
+// ======================================================================== //
 
 #include "alloc.h"
-#include "../../common/sys/thread.h"
-#if defined(APPLE) && defined(__aarch64__)
-#include "../../common/sys/barrier.h"
-#endif
+#include "../common/sys/thread.h"
 
 namespace embree
 {
-  __thread FastAllocator::ThreadLocal2* FastAllocator::thread_local_allocator2 = nullptr;
-  MutexSys FastAllocator::s_thread_local_allocators_lock;
-  std::vector<std::unique_ptr<FastAllocator::ThreadLocal2>> FastAllocator::s_thread_local_allocators;
-   
+namespace isa
+{
+  __thread isa::FastAllocator::ThreadLocal2* isa::FastAllocator::thread_local_allocator2 = nullptr;
+
+#if 0
   struct fast_allocator_regression_test : public RegressionTest
   {
     BarrierSys barrier;
     std::atomic<size_t> numFailed;
-    std::unique_ptr<FastAllocator> alloc;
+    std::unique_ptr<isa::FastAllocator> alloc;
 
     fast_allocator_regression_test() 
       : RegressionTest("fast_allocator_regression_test"), numFailed(0)
@@ -27,7 +38,7 @@ namespace embree
 
     static void thread_alloc(fast_allocator_regression_test* This)
     {
-      FastAllocator::CachedAllocator threadalloc = This->alloc->getCachedAllocator();
+      isa::FastAllocator::CachedAllocator threadalloc = This->alloc->getCachedAllocator();
 
       size_t* ptrs[1000];
       for (size_t j=0; j<1000; j++)
@@ -47,7 +58,7 @@ namespace embree
     
     bool run ()
     {
-      alloc = make_unique(new FastAllocator(nullptr,false));
+      alloc = make_unique(new isa::FastAllocator(nullptr,false));
       numFailed.store(0);
 
       size_t numThreads = getNumberOfLogicalThreads();
@@ -77,6 +88,7 @@ namespace embree
   };
 
   fast_allocator_regression_test fast_allocator_regression;
+#endif
 }
-
+}
 

@@ -9,6 +9,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /* Hit structure for K hits */
   template<int K>
     struct HitK
@@ -150,4 +152,5 @@ namespace embree
     instance_id_stack::copy_VV<K>(hit.instPrimID, ray.instPrimID, mask);
 #endif
   }
+}
 }

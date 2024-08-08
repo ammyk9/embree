@@ -1,5 +1,5 @@
 // ======================================================================== //
-// Copyright 2009-2016 Intel Corporation                                    //
+// Copyright 2009-2017 Intel Corporation                                    //
 //                                                                          //
 // Licensed under the Apache License, Version 2.0 (the "License");          //
 // you may not use this file except in compliance with the License.         //
@@ -31,6 +31,8 @@
 
 namespace embree
 {
+namespace isa
+{
   /********************** Bezier1v **************************/
 
   Bezier1v::Type::Type () 
@@ -40,7 +42,11 @@ namespace embree
     return 1;
   }
 
-  Bezier1v::Type Bezier1v::type;
+  const Bezier1v::Type& Bezier1v::type() 
+  {
+    static Bezier1v::Type ty;
+    return ty;
+  }
 
   /********************** Bezier1i **************************/
 
@@ -51,7 +57,11 @@ namespace embree
     return 1;
   }
 
-  Bezier1i::Type Bezier1i::type;
+  const Bezier1i::Type& Bezier1i::type() 
+  {
+    static Bezier1i::Type ty;
+    return ty;
+  }
 
   /********************** Line4i **************************/
 
@@ -62,6 +72,13 @@ namespace embree
   template<>
   size_t Line4i::Type::size(const char* This) const {
     return ((Line4i*)This)->size();
+  }
+
+  template<>
+  const Line4i::Type& Line4i::type() 
+  {
+    static Line4i::Type ty;
+    return ty;
   }
   
   /********************** Triangle4 **************************/
@@ -75,6 +92,13 @@ namespace embree
     return ((Triangle4*)This)->size();
   }
 
+  template<>
+  const Triangle4::Type& Triangle4::type() 
+  {
+    static Triangle4::Type ty;
+    return ty;
+  }
+
   /********************** Triangle4v **************************/
 
   template<>
@@ -84,6 +108,13 @@ namespace embree
   template<>
   size_t Triangle4v::Type::size(const char* This) const {
     return ((Triangle4v*)This)->size();
+  }
+
+  template<>
+  const Triangle4v::Type& Triangle4v::type() 
+  {
+    static Triangle4v::Type ty;
+    return ty;
   }
 
   /********************** Triangle4i **************************/
@@ -98,8 +129,10 @@ namespace embree
   }
 
   template<>
-  void Triangle4i::Type::sort(char* This, const Scene* scene) const {
-    ((Triangle4i*)This)->sort(scene);
+  const Triangle4i::Type& Triangle4i::type() 
+  {
+    static Triangle4i::Type ty;
+    return ty;
   }
 
   /********************** Triangle4vMB **************************/
@@ -113,6 +146,13 @@ namespace embree
     return ((Triangle4vMB*)This)->size();
   }
 
+  template<>
+  const Triangle4vMB::Type& Triangle4vMB::type() 
+  {
+    static Triangle4vMB::Type ty;
+    return ty;
+  }
+
   /********************** Triangle4iMB **************************/
 
   template<>
@@ -122,6 +162,13 @@ namespace embree
   template<>
   size_t Triangle4iMB::Type::size(const char* This) const {
     return ((Triangle4iMB*)This)->size();
+  }
+
+  template<>
+  const Triangle4iMB::Type& Triangle4iMB::type() 
+  {
+    static Triangle4iMB::Type ty;
+    return ty;
   }
 
   /********************** Quad4v **************************/
@@ -135,6 +182,13 @@ namespace embree
     return ((Quad4v*)This)->size();
   }
 
+  template<>
+  const Quad4v::Type& Quad4v::type() 
+  {
+    static Quad4v::Type ty;
+    return ty;
+  }
+
   /********************** Quad4i **************************/
 
   template<>
@@ -144,6 +198,13 @@ namespace embree
   template<>
   size_t Quad4i::Type::size(const char* This) const {
     return ((Quad4i*)This)->size();
+  }
+
+  template<>
+  const Quad4i::Type& Quad4i::type() 
+  {
+    static Quad4i::Type ty;
+    return ty;
   }
 
   /********************** Quad4iMB **************************/
@@ -157,6 +218,13 @@ namespace embree
     return ((Quad4iMB*)This)->size();
   }
 
+  template<>
+  const Quad4iMB::Type& Quad4iMB::type() 
+  {
+    static Quad4iMB::Type ty;
+    return ty;
+  }
+
   /********************** SubdivPatch1 **************************/
 
   SubdivPatch1Cached::Type::Type () 
@@ -166,7 +234,11 @@ namespace embree
     return 1;
   }
 
-  SubdivPatch1Cached::Type SubdivPatch1Cached::type;
+  const SubdivPatch1Cached::Type& SubdivPatch1Cached::type() 
+  {
+    static SubdivPatch1Cached::Type ty;
+    return ty;
+  }
 
   /********************** SubdivPatch1Cached **************************/
 
@@ -177,7 +249,11 @@ namespace embree
     return 1;
   }
 
-  SubdivPatch1Cached::TypeCached SubdivPatch1Cached::type_cached;
+  const SubdivPatch1Cached::TypeCached& SubdivPatch1Cached::type_cached() 
+  {
+    static SubdivPatch1Cached::TypeCached ty;
+    return ty;
+  }
 
   /********************** Virtual Object **************************/
 
@@ -188,5 +264,10 @@ namespace embree
     return 1;
   }
 
-  Object::Type Object::type;
+  const Object::Type& Object::type() 
+  {
+    static Object::Type ty;
+    return ty;
+  }
+}
 }

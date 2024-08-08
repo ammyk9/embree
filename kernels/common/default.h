@@ -55,6 +55,8 @@
 
 namespace embree
 {
+namespace isa
+{
   ////////////////////////////////////////////////////////////////////////////////
   /// Vec2 shortcuts
   ////////////////////////////////////////////////////////////////////////////////
@@ -263,4 +265,5 @@ namespace embree
     const float upper = (range.upper-time_range.lower)/time_range.size();
     return getTimeSegmentRange(BBox1f(lower,upper),numTimeSegments);
   }
+}
 }
