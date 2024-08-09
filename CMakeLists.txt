@@ -1,10 +1,23 @@
-## Copyright 2009-2021 Intel Corporation
-## SPDX-License-Identifier: Apache-2.0
+## ======================================================================== ##
+## Copyright 2009-2020 Intel Corporation                                    ##
+##                                                                          ##
+## Licensed under the Apache License, Version 2.0 (the "License");          ##
+## you may not use this file except in compliance with the License.         ##
+## You may obtain a copy of the License at                                  ##
+##                                                                          ##
+##     http://www.apache.org/licenses/LICENSE-2.0                           ##
+##                                                                          ##
+## Unless required by applicable law or agreed to in writing, software      ##
+## distributed under the License is distributed on an "AS IS" BASIS,        ##
+## WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. ##
+## See the License for the specific language governing permissions and      ##
+## limitations under the License.                                           ##
+## ======================================================================== ##
 
 SET(EMBREE_VERSION_MAJOR 3)
-SET(EMBREE_VERSION_MINOR 13)
+SET(EMBREE_VERSION_MINOR 7)
 SET(EMBREE_VERSION_PATCH 1)
-SET(EMBREE_VERSION_NOTE "")
+SET(EMBREE_VERSION_NOTE "-alpha.0")
 
 SET(EMBREE_VERSION ${EMBREE_VERSION_MAJOR}.${EMBREE_VERSION_MINOR}.${EMBREE_VERSION_PATCH})
 MATH(EXPR EMBREE_VERSION_NUMBER "10000*${EMBREE_VERSION_MAJOR} + 100*${EMBREE_VERSION_MINOR} + ${EMBREE_VERSION_PATCH}")
@@ -12,7 +25,7 @@ SET(CPACK_RPM_PACKAGE_RELEASE 1)
 
 PROJECT(embree${EMBREE_VERSION_MAJOR})
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.1.0)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8.11)
 
 # We use our own strip tool on macOS to sign during install. This is required as CMake modifies RPATH of the binary during install.
 IF (APPLE AND EMBREE_SIGN_FILE)
@@ -61,13 +74,7 @@ IF(COMMAND cmake_policy)
     cmake_policy(SET CMP0042 NEW)
   endif()
   if(POLICY CMP0072)
-    cmake_policy(SET CMP0072 NEW)
-  endif()
-  if(POLICY CMP0022)
-    cmake_policy(SET CMP0022 NEW)
-  endif()
-  if(POLICY CMP0074)
-    cmake_policy(SET CMP0074 NEW)
+    cmake_policy(SET CMP0072 OLD)
   endif()
 ENDIF(COMMAND cmake_policy)
 
@@ -85,13 +92,6 @@ SET(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/common/cmake ${CMAKE_MODULE_PA
 IF (BUILD_TESTING)
   INCLUDE(test)
 ENDIF()
-
-set(BUILD_DOC OFF CACHE INTERNAL "build documentation (internal only)")
-IF (BUILD_DOC)
-  ADD_SUBDIRECTORY(doc)
-ENDIF()
-
-OPTION(EMBREE_TUTORIALS    "Enable to build Embree tutorials" ON)
 
 ##############################################################
 # Embree configuration
@@ -112,6 +112,7 @@ ELSE()
 ENDIF()
 
 OPTION(EMBREE_ISPC_SUPPORT "Build Embree with support for ISPC applications." ON)
+OPTION(EMBREE_TUTORIALS    "Enable to build Embree tutorials" ON)
 SET(EMBREE_API_NAMESPACE "" CACHE STRING "C++ namespace to put API symbols into.")
 SET(EMBREE_LIBRARY_NAME  "embree${EMBREE_VERSION_MAJOR}" CACHE STRING "Name of the embree library file (default is embree${EMBREE_VERSION_MAJOR})")
 
@@ -121,9 +122,6 @@ ENDIF()
 
 ##############################################################################
 # Configurations (add configurations also to common/cmake/embree-config.cmake)
-
-OPTION(EMBREE_ZIP_MODE "Create Embree ZIP package" OFF)
-MARK_AS_ADVANCED(EMBREE_ZIP_MODE)
 
 OPTION(EMBREE_INSTALL_DEPENDENCIES "Install Embree dependencies in binary packages and install" OFF)
 MARK_AS_ADVANCED(EMBREE_INSTALL_DEPENDENCIES)
@@ -135,7 +133,6 @@ OPTION(EMBREE_RAY_MASK "Enables ray mask support.")
 OPTION(EMBREE_BACKFACE_CULLING "Enables backface culling.")
 OPTION(EMBREE_FILTER_FUNCTION "Enables filter functions." ON)
 OPTION(EMBREE_IGNORE_INVALID_RAYS "Ignores invalid rays." OFF) # FIXME: enable by default?
-OPTION(EMBREE_COMPACT_POLYS "Enables double indexed poly layout." OFF)
 
 OPTION(EMBREE_GEOMETRY_TRIANGLE "Enables support for triangle geometries." ON)
 OPTION(EMBREE_GEOMETRY_QUAD "Enables support for quad geometries." ON)
@@ -149,7 +146,6 @@ OPTION(EMBREE_RAY_PACKETS "Enabled support for ray packets." ON)
 
 SET(EMBREE_MAX_INSTANCE_LEVEL_COUNT 1 CACHE STRING "Maximum number of instance levels.")
 SET(EMBREE_CURVE_SELF_INTERSECTION_AVOIDANCE_FACTOR 2.0 CACHE STRING "Self intersection avoidance factor for flat curves. Specify floating point value in range 0 to inf.")
-OPTION(EMBREE_MIN_WIDTH "Enables min-width feature to enlarge curve and point thickness to pixel width." OFF)
 
 SET(EMBREE_TASKING_SYSTEM "TBB" CACHE STRING "Selects tasking system")
 IF (WIN32)
@@ -198,7 +194,7 @@ IF (WIN32)
     MESSAGE("Intel Compiler detected")
     INCLUDE (intel)
   ELSE()
-    IF (EMBREE_ISA_AVX512)
+    IF (EMBREE_ISA_AVX512KNL OR EMBREE_ISA_AVX512SKX)
       MESSAGE(FATAL_ERROR "Microsoft Visual C++ Compiler does not support AVX512. Please use Intel Compiler or Clang.")
     ENDIF()
     INCLUDE (msvc)
@@ -230,76 +226,60 @@ ENDIF (WIN32)
 # ISA configuration
 ##############################################################
 
-# just for compatibility with old naming
-IF(DEFINED EMBREE_ISA_AVX512SKX)
-  UNSET(EMBREE_ISA_AVX512 CACHE)
-  SET(EMBREE_ISA_AVX512 ${EMBREE_ISA_AVX512SKX} CACHE BOOL "")
-ENDIF()
-
-TRY_COMPILE(COMPILER_SUPPORTS_ARM_NEON ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_arm_neon.cpp)
-
-IF (CMAKE_CXX_COMPILER_WRAPPER STREQUAL "CrayPrgEnv")
+IF(CMAKE_CXX_COMPILER_WRAPPER STREQUAL "CrayPrgEnv")
   SET(EMBREE_MAX_ISA "DEFAULT" CACHE STRING "Selects highest ISA to support.")
 ELSE()
   SET(EMBREE_MAX_ISA "NONE" CACHE STRING "Selects highest ISA to support.")
 ENDIF()
-
-IF (COMPILER_SUPPORTS_ARM_NEON)
-  SET_PROPERTY(CACHE EMBREE_MAX_ISA PROPERTY STRINGS NONE SSE2 SSE4.2 AVX AVX2 DEFAULT)
-  SET(FLAGS_SSE2  "-D__SSE__ -D__SSE2__") 
-  SET(FLAGS_SSE42 "-D__SSE__ -D__SSE2__ -D__SSE4_1__ -D__SSE4_2__ ")
-  SET(FLAGS_AVX   "-D__SSE__ -D__SSE2__ -D__SSE4_1__ -D__SSE4_2__ -D__AVX__ -D__BMI__ -D__BMI2__ -D__LZCNT__")
-  SET(FLAGS_AVX2  "-D__SSE__ -D__SSE2__ -D__SSE4_1__ -D__SSE4_2__ -D__AVX__ -D__AVX2__ -D__BMI__ -D__BMI2__ -D__LZCNT__")
-ELSE()  
-  SET_PROPERTY(CACHE EMBREE_MAX_ISA PROPERTY STRINGS NONE SSE2 SSE4.2 AVX AVX2 AVX512 DEFAULT)
-ENDIF()
+SET_PROPERTY(CACHE EMBREE_MAX_ISA PROPERTY STRINGS NONE SSE2 SSE4.2 AVX AVX2 AVX512KNL AVX512SKX DEFAULT)
 
 IF (EMBREE_MAX_ISA STREQUAL "NONE")
-  TRY_COMPILE(COMPILER_SUPPORTS_AVX    ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX})
-  TRY_COMPILE(COMPILER_SUPPORTS_AVX2   ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX2})
-  TRY_COMPILE(COMPILER_SUPPORTS_AVX512 ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX512})
+  TRY_COMPILE(COMPILER_SUPPORTS_AVX       ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX})
+  TRY_COMPILE(COMPILER_SUPPORTS_AVX2      ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX2})
+  TRY_COMPILE(COMPILER_SUPPORTS_AVX512KNL ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX512KNL})
+  TRY_COMPILE(COMPILER_SUPPORTS_AVX512SKX ${CMAKE_BINARY_DIR} ${PROJECT_SOURCE_DIR}/common/cmake/check_isa.cpp COMPILE_DEFINITIONS ${FLAGS_AVX512SKX})
 
-  IF (COMPILER_SUPPORTS_ARM_NEON)
-    OPTION(EMBREE_ISA_SSE2 "Enables NEON SSE2 emulation." ON)
-    OPTION(EMBREE_ISA_SSE42 "Enables NEON SSE4.2 emulation." ON)
-    OPTION(EMBREE_ISA_AVX "Enables NEON AVX emulation." OFF)
-    OPTION(EMBREE_ISA_AVX2 "Enables NEON AVX2 emulation." OFF)
-  ELSE()
-    OPTION(EMBREE_ISA_SSE2 "Enables SSE2 ISA." ON)
-    OPTION(EMBREE_ISA_SSE42 "Enables SSE4.2 ISA." ON)
-    OPTION(EMBREE_ISA_AVX "Enables AVX ISA." ${COMPILER_SUPPORTS_AVX})
-    OPTION(EMBREE_ISA_AVX2 "Enables AVX2 ISA." ${COMPILER_SUPPORTS_AVX2})
-    IF (WIN32 OR APPLE)
-      OPTION(EMBREE_ISA_AVX512 "Enables AVX512 ISA." OFF)
-    ELSE()
-      OPTION(EMBREE_ISA_AVX512 "Enables AVX512 ISA." ${COMPILER_SUPPORTS_AVX512})
-    ENDIF()
+  IF (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
+    SET(COMPILER_SUPPORTS_AVX512SKX OFF)  # we disable this by default as GCC agressively produces AVX512 heavy instructions which reduce CPU frequency
   ENDIF()
-  
+
+  OPTION(EMBREE_ISA_SSE2 "Enables SSE2 ISA." ON)
+  OPTION(EMBREE_ISA_SSE42 "Enables SSE4.2 ISA." ON)
+  OPTION(EMBREE_ISA_AVX "Enables AVX ISA." ${COMPILER_SUPPORTS_AVX})
+  OPTION(EMBREE_ISA_AVX2 "Enables AVX2 ISA." ${COMPILER_SUPPORTS_AVX2})
+  IF (WIN32 OR APPLE)
+    OPTION(EMBREE_ISA_AVX512KNL "Enables AVX512 ISA for Knights Landing." OFF)
+    OPTION(EMBREE_ISA_AVX512SKX "Enables AVX512 ISA for Skylake." OFF)
+  ELSE()
+    OPTION(EMBREE_ISA_AVX512KNL "Enables AVX512 ISA for Knights Landing." OFF) # compilation on GCC 8 broken
+    OPTION(EMBREE_ISA_AVX512SKX "Enables AVX512 ISA for Skylake." ${COMPILER_SUPPORTS_AVX512SKX})
+  ENDIF()
 ELSEIF (EMBREE_MAX_ISA STREQUAL "DEFAULT")
   UNSET(EMBREE_ISA_SSE2 CACHE)
   UNSET(EMBREE_ISA_SSE42 CACHE)
   UNSET(EMBREE_ISA_AVX CACHE)
   UNSET(EMBREE_ISA_AVX2 CACHE)
-  UNSET(EMBREE_ISA_AVX512 CACHE)
+  UNSET(EMBREE_ISA_AVX512KNL CACHE)
+  UNSET(EMBREE_ISA_AVX512SKX CACHE)
   SET(EMBREE_ISA_SSE2 OFF)
   SET(EMBREE_ISA_SSE42 OFF)
   SET(EMBREE_ISA_AVX OFF)
   SET(EMBREE_ISA_AVX2 OFF)
-  SET(EMBREE_ISA_AVX512 OFF)
+  SET(EMBREE_ISA_AVX512KNL OFF)
+  SET(EMBREE_ISA_AVX512SKX OFF)
   MESSAGE(STATUS "Detecting default ISA...")
   INCLUDE(check_isa_default)
   CHECK_ISA_DEFAULT(EMBREE_ISA_DEFAULT)
   MESSAGE(STATUS "Detected default ISA: ${EMBREE_ISA_DEFAULT}")
   SET(EMBREE_ISA_${EMBREE_ISA_DEFAULT} ON)
-  
 ELSE()
   UNSET(EMBREE_ISA_SSE2 CACHE)
   UNSET(EMBREE_ISA_SSE42 CACHE)
   UNSET(EMBREE_ISA_AVX CACHE)
   UNSET(EMBREE_ISA_AVX2 CACHE)
-  UNSET(EMBREE_ISA_AVX512 CACHE)
- 
+  UNSET(EMBREE_ISA_AVX512KNL CACHE)
+  UNSET(EMBREE_ISA_AVX512SKX CACHE)
+
   IF(EMBREE_MAX_ISA STREQUAL "SSE2")
     SET(ISA  1)
   ELSEIF(EMBREE_MAX_ISA STREQUAL "SSE4.2")
@@ -308,10 +288,10 @@ ELSE()
     SET(ISA  3)
   ELSEIF(EMBREE_MAX_ISA STREQUAL "AVX2")
     SET(ISA  4)
-  ELSEIF(EMBREE_MAX_ISA STREQUAL "AVX512")
-    SET(ISA 5)
-  ELSEIF(EMBREE_MAX_ISA STREQUAL "AVX512SKX")  # just for compatibility
-    SET(ISA 5)
+  ELSEIF(EMBREE_MAX_ISA STREQUAL "AVX512KNL")
+    SET(ISA  5)
+  ELSEIF(EMBREE_MAX_ISA STREQUAL "AVX512SKX")
+    SET(ISA 6)
   ELSE()
     MESSAGE(FATAL_ERROR "Unsupported ISA specified: " ${EMBREE_MAX_ISA})
   ENDIF()
@@ -320,7 +300,8 @@ ELSE()
   SET(EMBREE_ISA_SSE42 OFF)
   SET(EMBREE_ISA_AVX OFF)
   SET(EMBREE_ISA_AVX2 OFF)
-  SET(EMBREE_ISA_AVX512 OFF)
+  SET(EMBREE_ISA_AVX512KNL OFF)
+  SET(EMBREE_ISA_AVX512SKX OFF)
 
   IF (ISA GREATER 0)
     SET(EMBREE_ISA_SSE2  ON)
@@ -335,9 +316,11 @@ ELSE()
     SET(EMBREE_ISA_AVX2  ON)
   ENDIF ()
   IF (ISA GREATER 4)
-    SET(EMBREE_ISA_AVX512  ON)
+    SET(EMBREE_ISA_AVX512KNL  ON)
   ENDIF ()
-
+  IF (ISA GREATER 5)
+    SET(EMBREE_ISA_AVX512SKX  ON)
+  ENDIF ()
 ENDIF()
 
 IF(CMAKE_CXX_COMPILER_WRAPPER STREQUAL "CrayPrgEnv")
@@ -360,16 +343,25 @@ IF (APPLE AND EMBREE_STATIC_LIB)
   IF (EMBREE_ISA_AVX2)
     MATH(EXPR NUMISA "${NUMISA}+1")
   ENDIF()
-  IF (EMBREE_ISA_AVX512)
+  IF (EMBREE_ISA_AVX512KNL)
+    MATH(EXPR NUMISA "${NUMISA}+1")
+  ENDIF()
+  IF (EMBREE_ISA_AVX512SKX)
     MATH(EXPR NUMISA "${NUMISA}+1")
   ENDIF()
 
   IF (NUMISA GREATER 1)
     IF (${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
-      IF (${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER "9.0.0" OR ${CMAKE_CXX_COMPILER_VERSION} VERSION_EQUAL "9.0.0")
-        MESSAGE(FATAL_ERROR "Using Embree as static library is not supported with AppleClang >= 9.0 when multiple ISAs are selected. Please either build a shared library or enable only one ISA.")
+      IF (${CMAKE_CXX_COMPILER_VERSION} MATCHES "^9\\..*")
+        MESSAGE(FATAL_ERROR "Using Embree as static library is not supported with AppleClang 9.X when multiple ISAs are selected. Please either build a shared library or enable only one ISA.")
       ENDIF()
     ENDIF()
+  ENDIF()
+ENDIF()
+
+IF (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
+  IF (EMBREE_ISA_AVX512SKX)
+    MESSAGE(WARNING "Enabling AVX512SKX on GCC may reduce CPU frequency.")
   ENDIF()
 ENDIF()
 
@@ -377,54 +369,19 @@ ENDIF()
 # ISA configuration continued
 ##############################################################
 
-# configure ISPC targets
-IF (COMPILER_SUPPORTS_ARM_NEON)
-  
-  IF (EMBREE_ISA_SSE2 OR EMBREE_ISA_SSE42)
-    LIST(APPEND ISPC_TARGETS "neon-i32x4")
-  ENDIF()
-  
-  IF (EMBREE_ISA_AVX2 OR EMBREE_ISA_AVX2)
-    LIST(APPEND ISPC_TARGETS "neon-i32x8")
-  ENDIF()
-  
-ELSE()
-  
-  IF (EMBREE_ISA_SSE2)
-    LIST(APPEND ISPC_TARGETS "sse2")
-  ENDIF()
-  
-  IF (EMBREE_ISA_SSE42)
-    LIST(APPEND ISPC_TARGETS "sse4")
-  ENDIF ()
-  
-  IF (EMBREE_ISA_AVX)
-    LIST(APPEND ISPC_TARGETS "avx")
-  ENDIF ()
-  
-  IF (EMBREE_ISA_AVX2)
-    LIST(APPEND ISPC_TARGETS "avx2")
-  ENDIF ()
-  
-  IF (EMBREE_ISA_AVX512)
-    LIST(APPEND ISPC_TARGETS "avx512skx-i32x16")
-  ENDIF ()
-
-ENDIF()
-
 SET(SSE2 0)
 SET(SSE42 1)
 SET(AVX 2)
 SET(AVX2 3)
-SET(AVX512 4)
+SET(AVX512KNL 4)
+SET(AVX512SKX 5)
 
 UNSET(FLAGS_LOWEST)
-SET(ISA_LOWEST -1)
 SET(ISA_LOWEST_AVX 2)
 
-# configure target defines and lowest ISA
 IF (EMBREE_ISA_SSE2)
   ADD_DEFINITIONS(-DEMBREE_TARGET_SSE2)
+  LIST(APPEND ISPC_TARGETS "sse2")
   IF(NOT FLAGS_LOWEST)
     SET(ISA_LOWEST ${SSE2})
     SET(FLAGS_LOWEST ${FLAGS_SSE2})
@@ -433,6 +390,7 @@ ENDIF()
 
 IF (EMBREE_ISA_SSE42)
   ADD_DEFINITIONS(-DEMBREE_TARGET_SSE42)
+  LIST(APPEND ISPC_TARGETS "sse4")
   IF(NOT FLAGS_LOWEST)
     SET(ISA_LOWEST ${SSE42})
     SET(FLAGS_LOWEST ${FLAGS_SSE42})
@@ -441,6 +399,7 @@ ENDIF ()
 
 IF (EMBREE_ISA_AVX)
   ADD_DEFINITIONS(-DEMBREE_TARGET_AVX)
+  LIST(APPEND ISPC_TARGETS "avx")
   IF(NOT FLAGS_LOWEST)
     SET(ISA_LOWEST ${AVX})
     SET(ISA_LOWEST_AVX ${AVX})
@@ -450,6 +409,7 @@ ENDIF ()
 
 IF (EMBREE_ISA_AVX2)
   ADD_DEFINITIONS(-DEMBREE_TARGET_AVX2)
+  LIST(APPEND ISPC_TARGETS "avx2")
   IF(NOT FLAGS_LOWEST)
     SET(ISA_LOWEST ${AVX2})
     SET(ISA_LOWEST_AVX ${AVX2})
@@ -457,26 +417,25 @@ IF (EMBREE_ISA_AVX2)
   ENDIF()
 ENDIF ()
 
-IF (EMBREE_ISA_AVX512)
-  ADD_DEFINITIONS(-DEMBREE_TARGET_AVX512)
+IF (EMBREE_ISA_AVX512KNL)
+  ADD_DEFINITIONS(-DEMBREE_TARGET_AVX512KNL)
+  LIST(APPEND ISPC_TARGETS "avx512knl-i32x16")
   IF(NOT FLAGS_LOWEST)
-    SET(ISA_LOWEST ${AVX512})
-    SET(ISA_LOWEST_AVX ${AVX512})
-    SET(FLAGS_LOWEST ${FLAGS_AVX512})
+    SET(ISA_LOWEST ${AVX512KNL})
+    SET(ISA_LOWEST_AVX ${AVX512KNL})
+    SET(FLAGS_LOWEST ${FLAGS_AVX512KNL})
   ENDIF()
 ENDIF ()
 
-IF (COMPILER_SUPPORTS_ARM_NEON AND EMBREE_RAY_PACKETS AND (EMBREE_ISA_AVX OR EMBREE_ISA_AVX2))
-  MESSAGE(FATAL_ERROR "Ray packets are not yet supported in AVX and AVX2 mode on NEON ISA.")
-ENDIF()
-
-IF (NOT EMBREE_ISA_AVX AND (EMBREE_ISA_AVX2 OR EMBREE_ISA_AVX512))
-  MESSAGE(FATAL_ERROR "You also have to enable AVX when enabling AVX2 or AVX512")
-ENDIF()
-
-IF (ISA_LOWEST EQUAL -1)
-  MESSAGE(FATAL_ERROR "You have to enable at least one ISA!")
-ENDIF()
+IF (EMBREE_ISA_AVX512SKX)
+  ADD_DEFINITIONS(-DEMBREE_TARGET_AVX512SKX)
+  LIST(APPEND ISPC_TARGETS "avx512skx-i32x16")
+  IF(NOT FLAGS_LOWEST)
+    SET(ISA_LOWEST ${AVX512SKX})
+    SET(ISA_LOWEST_AVX ${AVX512SKX})
+    SET(FLAGS_LOWEST ${FLAGS_AVX512SKX})
+  ENDIF()
+ENDIF ()
 
 INCLUDE (ispc)
 
@@ -512,6 +471,13 @@ CONFIGURE_FILE(
   "${PROJECT_SOURCE_DIR}/kernels/export.macosx.map"
 )
 
+##############################################################
+# Search paths
+##############################################################
+IF (TASKING_TBB)
+  FIND_PACKAGE(TBB REQUIRED)
+  INCLUDE_DIRECTORIES(${TBB_INCLUDE_DIRS})
+ENDIF()
 
 ##############################################################
 # Output paths
@@ -534,17 +500,15 @@ ENDIF()
 # Uninstall
 ##############################################################
 
-IF (NOT TARGET uninstall)
-  configure_file(
-      "${CMAKE_CURRENT_SOURCE_DIR}/common/cmake/uninstall.cmake.in"
-      "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake"
-      IMMEDIATE @ONLY)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/cmake/uninstall.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake"
+    IMMEDIATE @ONLY)
 
-  add_custom_target(uninstall
-      COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake)
+add_custom_target(uninstall
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake)
 
-  SET_PROPERTY(TARGET uninstall PROPERTY FOLDER CMakePredefinedTargets)
-ENDIF()
+SET_PROPERTY(TARGET uninstall PROPERTY FOLDER CMakePredefinedTargets)
 
 ##############################################################
 # Has to be last
