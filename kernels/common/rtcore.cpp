@@ -38,16 +38,6 @@ RTC_NAMESPACE_BEGIN;
     RTC_TRACE(rtcNewSYCLDevice);
     Lock<MutexSys> lock(g_mutex);
 
-#if !defined(EMBREE_NO_SPLASH)
-    std::cout << std::endl;
-    std::cout << "==================================================================================" << std::endl;
-    std::cout << "  The SYCL support of Embree is in beta phase. Current functionality, quality,    " << std::endl;
-    std::cout << "  and GPU performance may not reflect that of the final product. Please read the  " << std::endl;
-    std::cout << "  documentation section \"Embree SYCL Known Issues\" for known limitations.       " << std::endl;
-    std::cout << "==================================================================================" << std::endl;
-    std::cout << std::endl;
-#endif
-
     DeviceGPU* device = new DeviceGPU(sycl_context,config);
     return (RTCDevice) device->refInc();
     RTC_CATCH_END(nullptr);
@@ -56,19 +46,23 @@ RTC_NAMESPACE_BEGIN;
 
   RTC_API bool rtcIsSYCLDeviceSupported(const sycl::device device)
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcIsSYCLDeviceSupported);
-    return rthwifIsSYCLDeviceSupported(device) > 0;
-    RTC_CATCH_END(nullptr);
+    try {
+      RTC_TRACE(rtcIsSYCLDeviceSupported);
+      return rthwifIsSYCLDeviceSupported(device) > 0;
+    } catch (...) {
+      return false;
+    }
     return false;
   }
 
   RTC_API int rtcSYCLDeviceSelector(const sycl::device device)
   {
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSYCLDeviceSelector);
-    return rthwifIsSYCLDeviceSupported(device);
-    RTC_CATCH_END(nullptr);
+    try {
+      RTC_TRACE(rtcSYCLDeviceSelector);
+      return rthwifIsSYCLDeviceSupported(device);
+    } catch (...) {
+      return -1;
+    }
     return -1;
   }
 
@@ -146,6 +140,17 @@ RTC_NAMESPACE_BEGIN;
     else                   return device->getDeviceErrorCode();
     RTC_CATCH_END(device);
     return RTC_ERROR_UNKNOWN;
+  }
+
+  RTC_API const char* rtcGetDeviceLastErrorMessage(RTCDevice hdevice)
+  {
+    Device* device = (Device*) hdevice;
+    RTC_CATCH_BEGIN;
+    RTC_TRACE(rtcGetDeviceLastErrorMessage);
+    if (device == nullptr) return Device::getThreadLastErrorMessage();
+    else                   return device->getDeviceLastErrorMessage();
+    RTC_CATCH_END(device);
+    return "";
   }
 
   RTC_API void rtcSetDeviceErrorFunction(RTCDevice hdevice, RTCErrorFunction error, void* userPtr)
@@ -292,13 +297,15 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_BEGIN;
     RTC_TRACE(rtcGetSceneFlags);
     RTC_VERIFY_HANDLE(hscene);
-    RTC_ENTER_DEVICE(hscene);
+    //RTC_ENTER_DEVICE(hscene);
     return scene->getSceneFlags();
     RTC_CATCH_END2(scene);
     return RTC_SCENE_FLAG_NONE;
   }
-  
-  RTC_API void rtcCommitScene (RTCScene hscene) 
+
+  RTC_API_EXTERN_C bool prefetchUSMSharedOnGPU(RTCScene scene);
+
+  RTC_API void rtcCommitScene (RTCScene hscene)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
@@ -306,6 +313,11 @@ RTC_NAMESPACE_BEGIN;
     RTC_VERIFY_HANDLE(hscene);
     RTC_ENTER_DEVICE(hscene);
     scene->commit(false);
+
+#if defined(EMBREE_SYCL_SUPPORT)
+    //prefetchUSMSharedOnGPU(hscene);
+#endif
+
     RTC_CATCH_END2(scene);
   }
 
@@ -557,15 +569,20 @@ RTC_NAMESPACE_BEGIN;
 
   RTC_API void rtcForwardIntersect1 (const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID)
   {
+    rtcForwardIntersect1Ex(args, hscene, iray_, instID, 0);
+  }
+
+  RTC_API void rtcForwardIntersect1Ex(const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID, unsigned int instPrimID)
+  {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect1);
+    RTC_TRACE(rtcForwardIntersect1Ex);
 #if defined(DEBUG)
     RTC_VERIFY_HANDLE(hscene);
     if (scene->isModified()) throw_RTCError(RTC_ERROR_INVALID_OPERATION,"scene not committed");
-    if (((size_t)iray_) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");   
+    if (((size_t)iray_) & 0x0F) throw_RTCError(RTC_ERROR_INVALID_ARGUMENT, "ray not aligned to 16 bytes");
 #endif
-    
+
     Ray* iray = (Ray*) iray_;
     RayHit* oray = (RayHit*)args->rayhit;
     RTCRayQueryContext* user_context = args->context;
@@ -578,10 +595,10 @@ RTC_NAMESPACE_BEGIN;
     RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
     RayQueryContext context(scene,user_context,iargs);
 
-    instance_id_stack::push(user_context, instID);
+    instance_id_stack::push(user_context, instID, instPrimID);
     scene->intersectors.intersect(*(RTCRayHit*)oray,&context);
     instance_id_stack::pop(user_context);
-    
+
     oray->org = ray_org_tnear;
     oray->dir = ray_dir_time;
 
@@ -655,7 +672,7 @@ RTC_NAMESPACE_BEGIN;
   }
 
   template<typename RTCRay, typename RTCRayHit, int N>
-  __forceinline void rtcForwardIntersectN (const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID)
+  __forceinline void rtcForwardIntersectN(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTCRayHit* oray = (RTCRayHit*)args->rayhit;
@@ -688,7 +705,7 @@ RTC_NAMESPACE_BEGIN;
     RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
     RayQueryContext context(scene,user_context,iargs);
 
-    instance_id_stack::push(user_context, instID);
+    instance_id_stack::push(user_context, instID, instPrimID);
     scene->intersectors.intersect(valid,*oray,&context);
     instance_id_stack::pop(user_context);
 
@@ -700,12 +717,18 @@ RTC_NAMESPACE_BEGIN;
     copy<N>(oray->ray.dir_z,ray_dir_z);
   }
 
-  RTC_API void rtcForwardIntersect4 (const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
+  RTC_API void rtcForwardIntersect4(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardIntersect4);
+    return rtcForwardIntersect4Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardIntersect4Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
     RTC_TRACE(rtcForwardIntersect4);
-    rtcForwardIntersectN<RTCRay4,RTCRayHit4,4>(valid,args,hscene,iray,instID);
+    rtcForwardIntersectN<RTCRay4,RTCRayHit4,4>(valid,args,hscene,iray,instID,instPrimID);
     RTC_CATCH_END2(scene);
   }
   
@@ -755,12 +778,18 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_END2(scene);
   }
 
-  RTC_API void rtcForwardIntersect8 (const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
+  RTC_API void rtcForwardIntersect8(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardIntersect8);
+    return rtcForwardIntersect8Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardIntersect8Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect8);
-    rtcForwardIntersectN<RTCRay8,RTCRayHit8,8>(valid,args,hscene,iray,instID);
+    RTC_TRACE(rtcForwardIntersect8Ex);
+    rtcForwardIntersectN<RTCRay8,RTCRayHit8,8>(valid,args,hscene,iray,instID,instPrimID);
     RTC_CATCH_END2(scene);
   }
 
@@ -809,12 +838,18 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_END2(scene);
   }
 
-  RTC_API void rtcForwardIntersect16 (const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
+  RTC_API void rtcForwardIntersect16(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardIntersect16);
+    return rtcForwardIntersect16Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardIntersect16Ex(const int* valid, const RTCIntersectFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardIntersect16);
-    rtcForwardIntersectN<RTCRay16,RTCRayHit16,16>(valid,args,hscene,iray,instID);
+    RTC_TRACE(rtcForwardIntersect16Ex);
+    rtcForwardIntersectN<RTCRay16,RTCRayHit16,16>(valid,args,hscene,iray,instID,instPrimID);
     RTC_CATCH_END2(scene);
   }
 
@@ -850,9 +885,15 @@ RTC_NAMESPACE_BEGIN;
 
   RTC_API void rtcForwardOccluded1 (const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID)
   {
+    RTC_TRACE(rtcForwardOccluded1);
+    return rtcForwardOccluded1Ex(args, hscene, iray_, instID, 0);
+  }
+
+  RTC_API void rtcForwardOccluded1Ex(const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray_, unsigned int instID, unsigned int instPrimID)
+  {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded1);
+    RTC_TRACE(rtcForwardOccluded1Ex);
     STAT3(shadow.travs,1,1,1);
 #if defined(DEBUG)
     RTC_VERIFY_HANDLE(hscene);
@@ -871,7 +912,7 @@ RTC_NAMESPACE_BEGIN;
     RTCIntersectArguments* iargs = ((OccludedFunctionNArguments*) args)->args;
     RayQueryContext context(scene,user_context,iargs);
 
-    instance_id_stack::push(user_context, instID);
+    instance_id_stack::push(user_context, instID, instPrimID);
     scene->intersectors.occluded(*(RTCRay*)oray,&context);
     instance_id_stack::pop(user_context);
     
@@ -927,7 +968,7 @@ RTC_NAMESPACE_BEGIN;
   }
 
   template<typename RTCRay, int N>
-  __forceinline void rtcForwardOccludedN (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID)
+  __forceinline void rtcForwardOccludedN (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTCRay* oray = (RTCRay*)args->ray;
@@ -960,7 +1001,7 @@ RTC_NAMESPACE_BEGIN;
     RTCIntersectArguments* iargs = ((IntersectFunctionNArguments*) args)->args;
     RayQueryContext context(scene,user_context,iargs);
 
-    instance_id_stack::push(user_context, instID);
+    instance_id_stack::push(user_context, instID, instPrimID);
     scene->intersectors.occluded(valid,*oray,&context);
     instance_id_stack::pop(user_context);
 
@@ -972,12 +1013,18 @@ RTC_NAMESPACE_BEGIN;
     copy<N>(oray->dir_z,ray_dir_z);
   }
 
-  RTC_API void rtcForwardOccluded4 (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
+  RTC_API void rtcForwardOccluded4(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardOccluded4);
+    return rtcForwardOccluded4Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardOccluded4Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay4* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
     RTC_TRACE(rtcForwardOccluded4);
-    rtcForwardOccludedN<RTCRay4,4>(valid,args,hscene,iray,instID);
+    rtcForwardOccludedN<RTCRay4,4>(valid,args,hscene,iray,instID,instPrimID);
     RTC_CATCH_END2(scene);
   }
  
@@ -1026,12 +1073,18 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_END2(scene);
   }
 
-  RTC_API void rtcForwardOccluded8 (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
+  RTC_API void rtcForwardOccluded8(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardOccluded8);
+    return rtcForwardOccluded8Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardOccluded8Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay8* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded8);
-    rtcForwardOccludedN<RTCRay8,8>(valid,args,hscene,iray, instID);
+    RTC_TRACE(rtcForwardOccluded8Ex);
+    rtcForwardOccludedN<RTCRay8,8>(valid, args, hscene, iray, instID, instPrimID);
     RTC_CATCH_END2(scene);
   }
    
@@ -1080,12 +1133,18 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_END2(scene);
   }
 
-  RTC_API void rtcForwardOccluded16 (const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
+  RTC_API void rtcForwardOccluded16(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID)
+  {
+    RTC_TRACE(rtcForwardOccluded16);
+    return rtcForwardOccluded16Ex(valid, args, hscene, iray, instID, 0);
+  }
+
+  RTC_API void rtcForwardOccluded16Ex(const int* valid, const RTCOccludedFunctionNArguments* args, RTCScene hscene, RTCRay16* iray, unsigned int instID, unsigned int instPrimID)
   {
     Scene* scene = (Scene*) hscene;
     RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcForwardOccluded16);
-    rtcForwardOccludedN<RTCRay16,16>(valid,args,hscene,iray, instID);
+    RTC_TRACE(rtcForwardOccluded16Ex);
+    rtcForwardOccludedN<RTCRay16,16>(valid, args, hscene, iray, instID, instPrimID);
     RTC_CATCH_END2(scene);
   }
   
@@ -1124,6 +1183,18 @@ RTC_NAMESPACE_BEGIN;
     RTC_CATCH_END2(geometry);
   }
 
+  RTC_API void rtcSetGeometryInstancedScenes(RTCGeometry hgeometry, RTCScene* scenes, size_t numScenes)
+  {
+    Geometry* geometry = (Geometry*) hgeometry;
+    RTC_CATCH_BEGIN;
+    RTC_TRACE(rtcSetGeometryInstancedScene);
+    RTC_VERIFY_HANDLE(hgeometry);
+    RTC_VERIFY_HANDLE(scenes);
+    RTC_ENTER_DEVICE(hgeometry);
+    geometry->setInstancedScenes(scenes, numScenes);
+    RTC_CATCH_END2(geometry);
+  }
+
   AffineSpace3fa loadTransform(RTCFormat format, const float* xfm)
   {
     AffineSpace3fa space = one;
@@ -1157,37 +1228,7 @@ RTC_NAMESPACE_BEGIN;
     return space;
   }
 
-  void storeTransform(const AffineSpace3fa& space, RTCFormat format, float* xfm)
-  {
-    switch (format)
-    {
-    case RTC_FORMAT_FLOAT3X4_ROW_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vy.x;  xfm[ 2] = space.l.vz.x;  xfm[ 3] = space.p.x;
-      xfm[ 4] = space.l.vx.y;  xfm[ 5] = space.l.vy.y;  xfm[ 6] = space.l.vz.y;  xfm[ 7] = space.p.y;
-      xfm[ 8] = space.l.vx.z;  xfm[ 9] = space.l.vy.z;  xfm[10] = space.l.vz.z;  xfm[11] = space.p.z;
-      break;
-
-    case RTC_FORMAT_FLOAT3X4_COLUMN_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vx.y;  xfm[ 2] = space.l.vx.z;
-      xfm[ 3] = space.l.vy.x;  xfm[ 4] = space.l.vy.y;  xfm[ 5] = space.l.vy.z;
-      xfm[ 6] = space.l.vz.x;  xfm[ 7] = space.l.vz.y;  xfm[ 8] = space.l.vz.z;
-      xfm[ 9] = space.p.x;     xfm[10] = space.p.y;     xfm[11] = space.p.z;
-      break;
-
-    case RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR:
-      xfm[ 0] = space.l.vx.x;  xfm[ 1] = space.l.vx.y;  xfm[ 2] = space.l.vx.z;  xfm[ 3] = 0.f;
-      xfm[ 4] = space.l.vy.x;  xfm[ 5] = space.l.vy.y;  xfm[ 6] = space.l.vy.z;  xfm[ 7] = 0.f;
-      xfm[ 8] = space.l.vz.x;  xfm[ 9] = space.l.vz.y;  xfm[10] = space.l.vz.z;  xfm[11] = 0.f;
-      xfm[12] = space.p.x;     xfm[13] = space.p.y;     xfm[14] = space.p.z;     xfm[15] = 1.f;
-      break;
-
-    default:
-      throw_RTCError(RTC_ERROR_INVALID_OPERATION, "invalid matrix format");
-      break;
-    }
-  }
-
-  RTC_API void rtcSetGeometryTransform(RTCGeometry hgeometry, unsigned int timeStep, RTCFormat format, const void* xfm)
+RTC_API void rtcSetGeometryTransform(RTCGeometry hgeometry, unsigned int timeStep, RTCFormat format, const void* xfm)
   {
     Geometry* geometry = (Geometry*) hgeometry;
     RTC_CATCH_BEGIN;
@@ -1240,10 +1281,32 @@ RTC_NAMESPACE_BEGIN;
     Geometry* geometry = (Geometry*) hgeometry;
     RTC_CATCH_BEGIN;
     RTC_TRACE(rtcGetGeometryTransform);
-    RTC_ENTER_DEVICE(hgeometry);
+    //RTC_ENTER_DEVICE(hgeometry); // no allocation required
     const AffineSpace3fa transform = geometry->getTransform(time);
     storeTransform(transform, format, (float*)xfm);
     RTC_CATCH_END2(geometry);
+  }
+
+  RTC_API void rtcGetGeometryTransformEx(RTCGeometry hgeometry, unsigned int instPrimID, float time, RTCFormat format, void* xfm)
+  {
+    Geometry* geometry = (Geometry*) hgeometry;
+    RTC_CATCH_BEGIN;
+    RTC_TRACE(rtcGetGeometryTransformEx);
+    //RTC_ENTER_DEVICE(hgeometry); // no allocation required
+    const AffineSpace3fa transform = geometry->getTransform(instPrimID, time);
+    storeTransform(transform, format, (float*)xfm);
+    RTC_CATCH_END2(geometry);
+  }
+
+  RTC_API void rtcGetGeometryTransformFromScene(RTCScene hscene, unsigned int geomID, float time, RTCFormat format, void* xfm)
+  {
+    Scene* scene = (Scene*) hscene;
+    RTC_CATCH_BEGIN;
+    RTC_TRACE(rtcGetGeometryTransformFromScene);
+    //RTC_ENTER_DEVICE(hscene); // no allocation required
+    const AffineSpace3fa transform = scene->get(geomID)->getTransform(time);
+    storeTransform(transform, format, (float*)xfm);
+    RTC_CATCH_END2(scene);
   }
 
   RTC_API void rtcInvokeIntersectFilterFromGeometry(const struct RTCIntersectFunctionNArguments* const args_i, const struct RTCFilterFunctionNArguments* filter_args)
@@ -1416,6 +1479,18 @@ RTC_NAMESPACE_BEGIN;
 #endif
     }
 
+    case RTC_GEOMETRY_TYPE_INSTANCE_ARRAY:
+    {
+#if defined(EMBREE_GEOMETRY_INSTANCE_ARRAY)
+      createInstanceArrayTy createInstanceArray = nullptr;
+      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createInstanceArray);
+      Geometry* geom = createInstanceArray(device);
+      return (RTCGeometry) geom->refInc();
+#else
+      throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_INSTANCE_ARRAY is not supported");
+#endif
+    }
+
     case RTC_GEOMETRY_TYPE_GRID:
     {
 #if defined(EMBREE_GEOMETRY_GRID)
@@ -1427,16 +1502,6 @@ RTC_NAMESPACE_BEGIN;
       throw_RTCError(RTC_ERROR_UNKNOWN,"RTC_GEOMETRY_TYPE_GRID is not supported");
 #endif
     }
-
-    case RTC_GEOMETRY_TYPE_LOSSY_COMPRESSED_GEOMETRY:
-    {
-#if defined(EMBREE_SYCL_SUPPORT)      
-      createLossyCompressedGeometryTy createLossyCompressedGeometry = nullptr;
-      SELECT_SYMBOL_DEFAULT_AVX_AVX2_AVX512(device->enabled_cpu_features,createLossyCompressedGeometry);
-      Geometry* geom = createLossyCompressedGeometry(device);
-      return (RTCGeometry) geom->refInc();
-#endif      
-    }    
     
     default:
       throw_RTCError(RTC_ERROR_UNKNOWN,"invalid geometry type");
@@ -1730,18 +1795,6 @@ RTC_NAMESPACE_BEGIN;
     return nullptr;
   }
 
-RTC_API void rtcSetLCData(RTCGeometry hgeometry, unsigned int numLCGs, void* pLCGs, void* pLCMs, unsigned int numLCGMs, void* pLCMIDs)    
-  {
-    Geometry* geometry = (Geometry*) hgeometry;
-    RTC_CATCH_BEGIN;
-    RTC_TRACE(rtcSetLCData);
-    RTC_VERIFY_HANDLE(hgeometry);
-    RTC_ENTER_DEVICE(hgeometry);
-    geometry->setLCData(numLCGs,pLCGs,pLCMs,numLCGMs,pLCMIDs);
-    RTC_CATCH_END2(geometry);
-  }
-
-
   RTC_API void rtcSetGeometryBoundsFunction (RTCGeometry hgeometry, RTCBoundsFunction bounds, void* userPtr)
   {
     Geometry* geometry = (Geometry*) hgeometry;
@@ -2017,5 +2070,15 @@ RTC_API void rtcSetLCData(RTCGeometry hgeometry, unsigned int numLCGs, void* pLC
     RTC_CATCH_END2(scene);
     return nullptr;
   }
+
+  RTC_API const char* rtcGetErrorString(RTCError error)
+  {
+    RTC_CATCH_BEGIN;
+    RTC_TRACE(rtcGetErrorString);
+    return Device::getErrorString(error);
+    RTC_CATCH_END(nullptr);
+    return nullptr;
+  }
+
 
 RTC_NAMESPACE_END

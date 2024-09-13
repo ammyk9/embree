@@ -1,7 +1,7 @@
 ## Copyright 2009-2021 Intel Corporation
 ## SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.1.0)
+cmake_minimum_required(VERSION 3.5)
 
 project(ze_raytracing)
 
@@ -11,13 +11,6 @@ SET(RTHWIF_VERSION_MAJOR 4)
 SET(RTHWIF_VERSION_MINOR 1)
 SET(RTHWIF_VERSION_PATCH 0)
 SET(RTHWIF_VERSION ${RTHWIF_VERSION_MAJOR}.${RTHWIF_VERSION_MINOR}.${RTHWIF_VERSION_PATCH})
-
-IF(COMMAND cmake_policy)
-  if(POLICY CMP0135)
-    message("set policy CMP0135 to NEW")
-    cmake_policy(SET CMP0135 NEW)
-  endif()
-ENDIF()
 
 SET(CMAKE_CXX_STANDARD 17)
 
@@ -85,68 +78,68 @@ endif()
 # information we need when TASKING_TBB is used
 set(TBB_TARGET tasking)
 
-if (EMBREE_BUILDER_TBB_STATIC OR NOT TASKING_TBB)
-
-  ####################################################################
-  # fetch TBB and build static version of it
-  set(TBB_TARGET tbb)
-  ADD_DEFINITIONS("-D_CRT_SECURE_NO_WARNINGS")
-
-  option(TBB_STRICT "Treat compiler warnings as errors" OFF)
-  option(TBB_TEST "Enable testing" OFF)
-  option(TBBMALLOC_BUILD "Enable tbbmalloc build" OFF)
-  SET(TBB_DIR OFF)
-  SET(BUILD_SHARED_LIBS OFF)
-
-  INCLUDE(FetchContent)
-
-  SET(FETCHCONTENT_QUIET OFF)
-
-  IF (NOT EMBREE_RTHWIF_TBB_GIT_REPOSITORY) # allow setting this externally
-    SET(EMBREE_RTHWIF_TBB_GIT_REPOSITORY "https://github.com/oneapi-src/oneTBB.git")
-  ENDIF()
-
-  FetchContent_Declare(
-    tbb_static
-    GIT_REPOSITORY ${EMBREE_RTHWIF_TBB_GIT_REPOSITORY}
-    GIT_TAG v2021.6.0
-  )
-
-  FetchContent_GetProperties(tbb_static)
-  if(NOT tbb_static_POPULATED)
-    FetchContent_Populate(tbb_static)
-    # We want to build tbb_static to link it into embree_rthwif, but don't want to
-    # install it as part of the Embree install targets.
-    add_subdirectory(${tbb_static_SOURCE_DIR} ${tbb_static_BINARY_DIR} EXCLUDE_FROM_ALL)
-  endif()
-
-  MARK_AS_ADVANCED(FETCHCONTENT_BASE_DIR)
-  MARK_AS_ADVANCED(FETCHCONTENT_FULLY_DISCONNECTED)
-  MARK_AS_ADVANCED(FETCHCONTENT_QUIET)
-  MARK_AS_ADVANCED(FETCHCONTENT_SOURCE_DIR_TBB_STATIC)
-  MARK_AS_ADVANCED(FETCHCONTENT_UPDATES_DISCONNECTED)
-  MARK_AS_ADVANCED(FETCHCONTENT_UPDATES_DISCONNECTED_TBB_STATIC)
-
-  MARK_AS_ADVANCED(TBB4PY_BUILD)
-  MARK_AS_ADVANCED(TBBMALLOC_BUILD)
-  MARK_AS_ADVANCED(TBB_BUILD)
-  MARK_AS_ADVANCED(TBB_CPF)
-  MARK_AS_ADVANCED(TBB_DISABLE_HWLOC_AUTOMATIC_SEARCH)
-  MARK_AS_ADVANCED(TBB_ENABLE_IPO)
-  MARK_AS_ADVANCED(TBB_EXAMPLES)
-  MARK_AS_ADVANCED(TBB_FIND_PACKAGE)
-  MARK_AS_ADVANCED(TBB_INSTALL_VARS)
-  MARK_AS_ADVANCED(TBB_NO_APPCONTAINER)
-  MARK_AS_ADVANCED(TBB_SANITIZE)
-  MARK_AS_ADVANCED(TBB_STRICT)
-  MARK_AS_ADVANCED(TBB_TEST)
-  MARK_AS_ADVANCED(TBB_TEST_SPEC)
-  MARK_AS_ADVANCED(TBB_VALGRIND_MEMCHECK)
-  MARK_AS_ADVANCED(TBB_WINDOWS_DRIVER)
-
-  ADD_DEFINITIONS(-DTASKING_TBB)
-  ####################################################################
-ENDIF()
+#if (EMBREE_BUILDER_TBB_STATIC OR NOT TASKING_TBB)
+#
+#  ####################################################################
+#  # fetch TBB and build static version of it
+#  set(TBB_TARGET tbb)
+#  ADD_DEFINITIONS("-D_CRT_SECURE_NO_WARNINGS")
+#
+#  option(TBB_STRICT "Treat compiler warnings as errors" OFF)
+#  option(TBB_TEST "Enable testing" OFF)
+#  option(TBBMALLOC_BUILD "Enable tbbmalloc build" OFF)
+#  SET(TBB_DIR OFF)
+#  SET(BUILD_SHARED_LIBS OFF)
+#
+#  INCLUDE(FetchContent)
+#
+#  SET(FETCHCONTENT_QUIET OFF)
+#
+#  IF (NOT EMBREE_RTHWIF_TBB_GIT_REPOSITORY) # allow setting this externally
+#    SET(EMBREE_RTHWIF_TBB_GIT_REPOSITORY "https://github.com/oneapi-src/oneTBB.git")
+#  ENDIF()
+#
+#  FetchContent_Declare(
+#    tbb_static
+#    GIT_REPOSITORY ${EMBREE_RTHWIF_TBB_GIT_REPOSITORY}
+#    GIT_TAG v2021.6.0
+#  )
+#
+#  FetchContent_GetProperties(tbb_static)
+#  if(NOT tbb_static_POPULATED)
+#    FetchContent_Populate(tbb_static)
+#    # We want to build tbb_static to link it into embree_rthwif, but don't want to
+#    # install it as part of the Embree install targets.
+#    add_subdirectory(${tbb_static_SOURCE_DIR} ${tbb_static_BINARY_DIR} EXCLUDE_FROM_ALL)
+#  endif()
+#
+#  MARK_AS_ADVANCED(FETCHCONTENT_BASE_DIR)
+#  MARK_AS_ADVANCED(FETCHCONTENT_FULLY_DISCONNECTED)
+#  MARK_AS_ADVANCED(FETCHCONTENT_QUIET)
+#  MARK_AS_ADVANCED(FETCHCONTENT_SOURCE_DIR_TBB_STATIC)
+#  MARK_AS_ADVANCED(FETCHCONTENT_UPDATES_DISCONNECTED)
+#  MARK_AS_ADVANCED(FETCHCONTENT_UPDATES_DISCONNECTED_TBB_STATIC)
+#
+#  MARK_AS_ADVANCED(TBB4PY_BUILD)
+#  MARK_AS_ADVANCED(TBBMALLOC_BUILD)
+#  MARK_AS_ADVANCED(TBB_BUILD)
+#  MARK_AS_ADVANCED(TBB_CPF)
+#  MARK_AS_ADVANCED(TBB_DISABLE_HWLOC_AUTOMATIC_SEARCH)
+#  MARK_AS_ADVANCED(TBB_ENABLE_IPO)
+#  MARK_AS_ADVANCED(TBB_EXAMPLES)
+#  MARK_AS_ADVANCED(TBB_FIND_PACKAGE)
+#  MARK_AS_ADVANCED(TBB_INSTALL_VARS)
+#  MARK_AS_ADVANCED(TBB_NO_APPCONTAINER)
+#  MARK_AS_ADVANCED(TBB_SANITIZE)
+#  MARK_AS_ADVANCED(TBB_STRICT)
+#  MARK_AS_ADVANCED(TBB_TEST)
+#  MARK_AS_ADVANCED(TBB_TEST_SPEC)
+#  MARK_AS_ADVANCED(TBB_VALGRIND_MEMCHECK)
+#  MARK_AS_ADVANCED(TBB_WINDOWS_DRIVER)
+#
+#  ADD_DEFINITIONS(-DTASKING_TBB)
+#  ####################################################################
+#ENDIF()
 
 IF (RTHWIF_STANDALONE)
   include(package_ze_raytracing)
@@ -157,41 +150,22 @@ IF (EMBREE_SYCL_RT_VALIDATION_API)
   ADD_LIBRARY(embree_rthwif_sycl STATIC rttrace/rttrace_validation.cpp)
   SET_PROPERTY(TARGET embree_rthwif_sycl APPEND PROPERTY COMPILE_FLAGS "-DEMBREE_SYCL_SUPPORT")
   SET_TARGET_PROPERTIES(embree_rthwif_sycl PROPERTIES COMPILE_FLAGS ${CMAKE_CXX_FLAGS_SYCL})
-  
+
   INSTALL(TARGETS embree_rthwif_sycl EXPORT embree_rthwif_sycl-targets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT lib)
   INSTALL(EXPORT embree_rthwif_sycl-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 
   SET(EMBREE_RTHWIF_SYCL embree_rthwif_sycl)
 ENDIF()
 
+IF (NOT EMBREE_SYCL_L0_RTAS_BUILDER)
 ADD_LIBRARY(embree_rthwif ${RTHWIF_LIB_TYPE} rtbuild/rtbuild.cpp rtbuild/qbvh6.cpp rtbuild/statistics.cpp)
 TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC ${EMBREE_RTHWIF_SYCL} PRIVATE ${TBB_TARGET} simd sys)
 SET_TARGET_PROPERTIES(embree_rthwif PROPERTIES OUTPUT_NAME ${RTHWIF_NAME})
 IF (EMBREE_RTHWIF_STATIC_LIB)
-  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_RTHWIF_STATIC_LIB)  
+  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_RTHWIF_STATIC_LIB)
 ENDIF()
 
-IF (EMBREE_SYCL_GPU_BVH_BUILDER)
-ADD_LIBRARY(embree_rthwif_gpu STATIC rtbuild/rthwif_embree_builder_ploc.cpp rtbuild/qbvh6.cpp rtbuild/statistics.cpp)
-TARGET_LINK_LIBRARIES(embree_rthwif_gpu PUBLIC tbb simd sys -lze_loader)
-SET_TARGET_PROPERTIES(embree_rthwif_gpu PROPERTIES COMPILE_FLAGS ${CMAKE_CXX_FLAGS_SYCL})
-ENDIF()
-
-TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC ${EMBREE_RTHWIF_SYCL} PRIVATE ${TBB_TARGET} simd sys)
-
-
-if (EMBREE_LEVEL_ZERO)
-  TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC -lze_loader)
-  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_LEVEL_ZERO)
-  TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_SYCL_SUPPORT)
-endif()
-
-IF (EMBREE_SYCL_GPU_BVH_BUILDER)
-  TARGET_LINK_LIBRARIES(embree_rthwif PUBLIC embree_rthwif_gpu)
-ENDIF()
-
-SET_PROPERTY(TARGET embree_rthwif APPEND PROPERTY COMPILE_FLAGS "-DEMBREE_SYCL_SUPPORT")
-
+TARGET_COMPILE_DEFINITIONS(embree_rthwif PUBLIC EMBREE_SYCL_SUPPORT)
 
 IF (EMBREE_STATIC_LIB OR NOT EMBREE_RTHWIF_STATIC_LIB)
   INSTALL(TARGETS embree_rthwif EXPORT ${RTHWIF_NAME}-targets
@@ -200,14 +174,9 @@ IF (EMBREE_STATIC_LIB OR NOT EMBREE_RTHWIF_STATIC_LIB)
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT devel)
   INSTALL(EXPORT ${RTHWIF_NAME}-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 ENDIF()
-
-IF (EMBREE_SYCL_GPU_BVH_BUILDER)
-INSTALL(TARGETS embree_rthwif_gpu EXPORT embree_rthwif_gpu-targets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT lib)
-INSTALL(EXPORT embree_rthwif_gpu-targets DESTINATION "${EMBREE_CMAKEEXPORT_DIR}" COMPONENT devel)
 ENDIF()
 
-IF (EMBREE_LEVEL_ZERO OR RTHWIF_STANDALONE)
-  ADD_SUBDIRECTORY(testing)
-ENDIF()
+#ADD_SUBDIRECTORY(testing)
+
 
 

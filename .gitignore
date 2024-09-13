@@ -8,7 +8,7 @@ x64
 kernels/config.h
 kernels/hash.h
 include/embree4/rtcore_config.h
-build
+build*
 out
 python/pybind11
 python/pyembree.egg-info
